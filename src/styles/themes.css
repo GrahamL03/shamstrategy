@@ -1,0 +1,190 @@
+@import "tailwindcss";
+
+/* ============================================================================
+ * 1. THEME TOKEN MAP (CSS CUSTOM PROPERTIES)
+ * ============================================================================ */
+
+/* --- 1. SHAMBASIC (MINIMAL DARK MODE - DEFAULT) --- */
+:root,
+[data-theme="shambasic"] {
+  --bg-canvas: #09090b;
+  --bg-card: #18181b;
+  --bg-hover: #27272a;
+  --text-primary: #fafafa;
+  --text-muted: #a1a1aa;
+  --accent-primary: #2563eb;
+  --accent-secondary: #3b82f6;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #22c55e;
+  --status-warning: #eab308;
+  --status-critical: #dc2626;
+  --border-subtle: #27272a;
+}
+
+/* --- 2. AUTONOMOUS (CYBER EMERALD & CYAN) --- */
+[data-theme="autonomous"] {
+  --bg-canvas: #030712;
+  --bg-card: #0f172a;
+  --bg-hover: #1e293b;
+  --text-primary: #f8fafc;
+  --text-muted: #64748b;
+  --accent-primary: #10b981;
+  --accent-secondary: #06b6d4;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-critical: #e11d48;
+  --border-subtle: #1e293b;
+}
+
+/* --- 3. TELEOP (DRIVER STATION AMBER & ORANGE) --- */
+[data-theme="teleop"] {
+  --bg-canvas: #0a0a0a;
+  --bg-card: #171717;
+  --bg-hover: #262626;
+  --text-primary: #ffffff;
+  --text-muted: #737373;
+  --accent-primary: #f59e0b;
+  --accent-secondary: #f97316;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #84cc16;
+  --status-warning: #eab308;
+  --status-critical: #ef4444;
+  --border-subtle: #262626;
+}
+
+/* --- 4. END GAME (NEON PURPLE & CLIMB GOLD) --- */
+[data-theme="endgame"] {
+  --bg-canvas: #090514;
+  --bg-card: #130b24;
+  --bg-hover: #20133a;
+  --text-primary: #faf5ff;
+  --text-muted: #8b5cf6;
+  --accent-primary: #a855f7;
+  --accent-secondary: #eab308;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-critical: #f43f5e;
+  --border-subtle: #20133a;
+}
+
+/* --- 5. QUEUING (INDUSTRIAL CAUTION YELLOW) --- */
+[data-theme="queuing"] {
+  --bg-canvas: #0c0a09;
+  --bg-card: #1c1917;
+  --bg-hover: #292524;
+  --text-primary: #f5f5f4;
+  --text-muted: #a8a29e;
+  --accent-primary: #eab308;
+  --accent-secondary: #f97316;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #22c55e;
+  --status-warning: #f59e0b;
+  --status-critical: #b91c1c;
+  --border-subtle: #292524;
+}
+
+/* --- 6. BLUE ALLIANCE (COBALT & CYAN) --- */
+[data-theme="blue_alliance"] {
+  --bg-canvas: #030b17;
+  --bg-card: #09182e;
+  --bg-hover: #102a4e;
+  --text-primary: #f0f7ff;
+  --text-muted: #60a5fa;
+  --accent-primary: #2563eb;
+  --accent-secondary: #38bdf8;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #34d399;
+  --status-warning: #fbbf24;
+  --status-critical: #fb7185;
+  --border-subtle: #102a4e;
+}
+
+/* --- 7. RED ALLIANCE (CHARCOAL & RUBY RED) --- */
+[data-theme="red_alliance"] {
+  --bg-canvas: #180303;
+  --bg-card: #2b0909;
+  --bg-hover: #441212;
+  --text-primary: #fff5f5;
+  --text-muted: #f87171;
+  --accent-primary: #dc2626;
+  --accent-secondary: #f97316;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #4ade80;
+  --status-warning: #facc15;
+  --status-critical: #ef4444;
+  --border-subtle: #441212;
+}
+
+/* --- 8. EINSTEIN (OBSIDIAN & CHAMPIONSHIP GOLD) --- */
+[data-theme="einstein"] {
+  --bg-canvas: #050505;
+  --bg-card: #121110;
+  --bg-hover: #211f1d;
+  --text-primary: #fffdf5;
+  --text-muted: #94a3b8;
+  --accent-primary: #d4af37;
+  --accent-secondary: #e2e8f0;
+  --alliance-red: #ef4444;
+  --alliance-red-tint: #450a0a;
+  --alliance-blue: #3b82f6;
+  --alliance-blue-tint: #172554;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-critical: #f43f5e;
+  --border-subtle: #211f1d;
+}
+
+/* ============================================================================
+ * 2. TAILWIND CSS V4 TOKEN MAPPINGS
+ * ============================================================================ */
+
+@theme {
+  --color-canvas: var(--bg-canvas);
+  --color-card: var(--bg-card);
+  --color-card-hover: var(--bg-hover);
+  
+  --color-txt-main: var(--text-primary);
+  --color-txt-muted: var(--text-muted);
+  
+  --color-brand: var(--accent-primary);
+  --color-brand-secondary: var(--accent-secondary);
+  
+  --color-alliance-red: var(--alliance-red);
+  --color-alliance-red-tint: var(--alliance-red-tint);
+  --color-alliance-blue: var(--alliance-blue);
+  --color-alliance-blue-tint: var(--alliance-blue-tint);
+  
+  --color-status-success: var(--status-success);
+  --color-status-warning: var(--status-warning);
+  --color-status-critical: var(--status-critical);
+  
+  --color-border-subtle: var(--border-subtle);
+}
+
+/* Global tabular-nums utility for scannable numeric data */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
