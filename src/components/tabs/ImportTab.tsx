@@ -4,8 +4,7 @@ import {
   ShieldCheck,
   Usb,
   FileSpreadsheet,
-  FileCode,
-  Image as ImageIcon,
+  ImageIcon,
   Upload,
   FolderInput,
   RefreshCw,
@@ -13,12 +12,21 @@ import {
   ShieldAlert,
   Scale,
   Edit2,
+  FileCode,
+  Trash2,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { appDataDir } from '@tauri-apps/api/path';
-import { readTextFile, copyFile, mkdir, exists } from '@tauri-apps/plugin-fs';
+import {
+  readTextFile,
+  copyFile,
+  mkdir,
+  exists,
+  readDir,
+  writeFile,
+} from '@tauri-apps/plugin-fs';
 import { useEventStore, useScoutStore } from '../../store';
 import { getDb } from '../../lib/db';
 import { StandScoutRecord, TeamPitData, ConflictRecord, SyncLogEntry } from '../../types';
@@ -34,13 +42,27 @@ interface UsbScanResult {
 }
 
 // Allowed literal types for SyncLogEntry source
-type LogSource = "USB" | "QR Scanner" | "File Drop" | "Manual" | "System Shell" | "SQLite Integrity";
+type LogSource =
+  | 'USB'
+  | 'QR Scanner'
+  | 'File Drop'
+  | 'Manual'
+  | 'System Shell'
+  | 'SQLite Integrity';
 
 export const ImportTab: React.FC = () => {
   // Store Hooks
-  const { systemStatus, activeEventKey, schedule } = useEventStore();
+  const {
+    systemStatus,
+    activeEventKey,
+    tbaApiKey,
+    schedule,
+    teams,
+    updateSystemStatus,
+  } = useEventStore();
   const {
     standRecords,
+    pitRecords,
     addStandRecord,
     upsertPitRecord,
     conflicts,
@@ -53,19 +75,12 @@ export const ImportTab: React.FC = () => {
   // USB Real-Time Polling State
   const [usbDriveInfo, setUsbDriveInfo] = useState<UsbScanResult | null>(null);
 
-  // USB Automation Options
-  const [autoImportCsv, setAutoImportCsv] = useState<boolean>(true);
-  const [autoCopyPhotos, setAutoCopyPhotos] = useState<boolean>(true);
-  const [autoEjectUsb, setAutoEjectUsb] = useState<boolean>(false);
-
-  // Photo Hub Automation Options
-  const [autoAssignFilename, setAutoAssignFilename] = useState<boolean>(true);
-  const [compressImages, setCompressImages] = useState<boolean>(true);
-
   // Local UX States
   const [usbSyncing, setUsbSyncing] = useState<boolean>(false);
   const [dragActiveData, setDragActiveData] = useState<boolean>(false);
   const [dragActivePhotos, setDragActivePhotos] = useState<boolean>(false);
+  const [isLoadingMatches, setIsLoadingMatches] = useState<boolean>(false);
+  const [isProcessingPhotos, setIsProcessingPhotos] = useState<boolean>(false);
 
   // Helper to build robust cross-platform system paths
   const buildFilePath = (mountPath: string, fileName: string) => {
@@ -75,8 +90,61 @@ export const ImportTab: React.FC = () => {
       : `${mountPath}${separator}${fileName}`;
   };
 
+  // Helper to extract team number from image filename (e.g. 5907_robot.jpg, team_254.png, 118.webp)
+  const extractTeamNumberFromFileName = (fileName: string): number | null => {
+    const cleanName = fileName.trim();
+    const matchStart = cleanName.match(/^(\d+)/);
+    if (matchStart) return parseInt(matchStart[1], 10);
+
+    const matchTeam = cleanName.match(/team[_\s-]?(\d+)/i);
+    if (matchTeam) return parseInt(matchTeam[1], 10);
+
+    const matchAnyDigit = cleanName.match(/(\d{1,5})/);
+    if (matchAnyDigit) return parseInt(matchAnyDigit[1], 10);
+
+    return null;
+  };
+
   // --------------------------------------------------------------------------
-  // STEP 1: Background USB Polling Hook
+  // STEP 1: TBA Match Count Ingestion
+  // --------------------------------------------------------------------------
+useEffect(() => {
+  const fetchTbaMatchCount = async () => {
+    if (!activeEventKey || !tbaApiKey) return;
+
+    setIsLoadingMatches(true);
+    try {
+      const response = await fetch(
+        `https://www.thebluealliance.com/api/v3/event/${activeEventKey}/matches`,
+        {
+          headers: {
+            'X-TBA-Auth-Key': tbaApiKey,
+          },
+        }
+      );
+
+      if (response.ok) {
+        const matches = await response.json();
+        const totalCount = Array.isArray(matches) ? matches.length : 0;
+
+        if (totalCount > 0) {
+          updateSystemStatus({ totalMatchesExpected: totalCount });
+        }
+      } else {
+        console.warn('Failed to fetch TBA matches:', response.statusText);
+      }
+    } catch (err) {
+      console.error('Error fetching TBA match data:', err);
+    } finally {
+      setIsLoadingMatches(false); // ✅ Corrected finally block
+    }
+  };
+
+  fetchTbaMatchCount();
+}, [activeEventKey, tbaApiKey, updateSystemStatus]);
+
+  // --------------------------------------------------------------------------
+  // STEP 2: Background USB Polling Hook
   // --------------------------------------------------------------------------
   useEffect(() => {
     let active = true;
@@ -92,7 +160,7 @@ export const ImportTab: React.FC = () => {
           }
         }
       } catch (_err) {
-        // Fallback for browser testing
+        // Fallback for browser environment
       }
     };
 
@@ -105,11 +173,15 @@ export const ImportTab: React.FC = () => {
     };
   }, []);
 
-  // Derived Metrics
-  const scoutedMatchesCount = schedule.filter(
-    (m) => (m.status as string) === 'completed' || (m.status as string) === 'scouted'
-  ).length;
-  const totalMatchesExpected = systemStatus.totalMatchesExpected || schedule.length || 60;
+  // Dynamic Derived Metrics based on unique matches in stand scouting records & schedule
+  const scoutedMatchesCount = new Set([
+    ...standRecords.map((r) => r.matchNumber),
+    ...schedule
+      .filter((m) => (m.status as string) === 'completed' || (m.status as string) === 'scouted')
+      .map((m) => m.matchNumber),
+  ]).size;
+
+  const totalMatchesExpected = systemStatus.totalMatchesExpected || schedule.length || 0;
 
   // Logging Helper
   const logTransaction = (
@@ -129,11 +201,76 @@ export const ImportTab: React.FC = () => {
       photosImported,
       errorsEncountered,
     } as unknown as SyncLogEntry;
-    
+
     addSyncLog(entry);
   };
 
-  // Real Photo Transfer Implementation
+  const handleClearSyncLogs = () => {
+    useScoutStore.setState({ syncLogs: [] });
+  };
+
+  // Update Pit Record & SQLite Database with Photo Path
+  const saveTeamPhotoReference = async (teamNumber: number, localPhotoPath: string) => {
+    const db = await getDb();
+    const pitRecord = Object.values(pitRecords).find((p) => p.teamNumber === teamNumber);
+    const teamRecord = teams.find((t) => t.teamNumber === teamNumber);
+    const rawRecord: any = pitRecord || teamRecord;
+
+    const updatedRecord: any = {
+      teamNumber,
+      teamName: rawRecord?.teamName || `Team ${teamNumber}`,
+      drivetrainType: rawRecord?.drivetrainType || 'Swerve',
+      motorType: rawRecord?.motorType || 'Kraken X60',
+      weightLbs: rawRecord?.weightLbs || 115,
+      widthInches: rawRecord?.widthInches || 28,
+      lengthInches: rawRecord?.lengthInches || 28,
+      frameBaseType: rawRecord?.frameBaseType || 'Square',
+      intakeType: rawRecord?.intakeType || 'Ground Intake',
+      maxCoralLevel: rawRecord?.maxCoralLevel || 'L4',
+      canScoreNet: rawRecord?.canScoreNet ?? true,
+      climberCapability: rawRecord?.climberCapability || 'Deep Climb',
+      hasVision: rawRecord?.hasVision ?? true,
+      autoPathsCount: rawRecord?.autoPathsCount || 3,
+      driverExperienceYears: rawRecord?.driverExperienceYears || 2,
+      overallRating: rawRecord?.overallRating || 'Top Tier',
+      pitScoutCompleted: true,
+      notes: rawRecord?.notes || '',
+      scoutName: rawRecord?.scoutName || 'Photo Ingest',
+      photoUrl: localPhotoPath,
+    };
+
+    upsertPitRecord(updatedRecord as TeamPitData);
+
+    if (db) {
+      try {
+        await db.execute(
+          `INSERT OR REPLACE INTO pit_scout_records 
+          (team_number, event_key, drivetrain, motors, weight, width, length, intake_type, max_coral, can_net, climb_cap, vision, notes, photo_url)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);`,
+          [
+            updatedRecord.teamNumber,
+            activeEventKey,
+            updatedRecord.drivetrainType,
+            updatedRecord.motorType,
+            updatedRecord.weightLbs,
+            updatedRecord.widthInches,
+            updatedRecord.lengthInches,
+            updatedRecord.intakeType,
+            updatedRecord.maxCoralLevel,
+            updatedRecord.canScoreNet ? 1 : 0,
+            updatedRecord.climberCapability,
+            updatedRecord.hasVision ? 1 : 0,
+            updatedRecord.notes,
+            localPhotoPath,
+          ]
+        );
+      } catch (err) {
+        console.error(`Failed to persist photo URL to SQLite for team ${teamNumber}:`, err);
+      }
+    }
+  };
+
+  // Real USB Photo Transfer Implementation
   const copyRobotPhotos = async (mountPath: string, photoFiles: string[]): Promise<number> => {
     if (photoFiles.length === 0) return 0;
 
@@ -153,6 +290,11 @@ export const ImportTab: React.FC = () => {
 
         await copyFile(sourcePath, destinationPath);
         copiedCount++;
+
+        const teamNum = extractTeamNumberFromFileName(photoFile);
+        if (teamNum) {
+          await saveTeamPhotoReference(teamNum, destinationPath);
+        }
       }
 
       return copiedCount;
@@ -199,7 +341,10 @@ export const ImportTab: React.FC = () => {
     for (const rawLine of lines) {
       const line = rawLine.trim();
       if (!line) continue;
-      const parts = line.split('|');
+
+      // Dynamically detect CSV (comma) vs Pipe delimiters
+      const delimiter = line.includes('|') ? '|' : ',';
+      const parts = line.split(delimiter).map((p) => p.trim());
 
       // MATCH SCOUTING PAYLOAD PARSING
       if (parts.length >= 15 && !isNaN(Number(parts[0]))) {
@@ -231,7 +376,9 @@ export const ImportTab: React.FC = () => {
         } as unknown as StandScoutRecord;
 
         const collision = standRecords.find(
-          (r: any) => r.matchNumber === (record as any).matchNumber && r.teamNumber === (record as any).teamNumber
+          (r: any) =>
+            r.matchNumber === (record as any).matchNumber &&
+            r.teamNumber === (record as any).teamNumber
         );
 
         if (collision) {
@@ -243,7 +390,7 @@ export const ImportTab: React.FC = () => {
             recordB: record,
             timestamp: Date.now(),
           } as unknown as ConflictRecord;
-          
+
           addConflict(newConflict);
           logTransaction(
             source,
@@ -256,17 +403,39 @@ export const ImportTab: React.FC = () => {
 
         if (db) {
           const r = record as any;
-          await db.execute(
-            `INSERT OR REPLACE INTO stand_scout_records 
-            (id, event_key, match_number, team_number, scout_name, alliance_color, driver_station_slot, auto_taxi, auto_l1, auto_l2, auto_l3, auto_l4, teleop_l1, teleop_l2, teleop_l3, teleop_l4, teleop_net, climb_status, yellow_card, notes, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);`,
-            [
-              r.id, r.eventKey, r.matchNumber, r.teamNumber, r.scoutName, r.allianceColor,
-              r.driverStationSlot, r.autoTaxi ? 1 : 0, r.autoL1, r.autoL2, r.autoL3, r.autoL4,
-              r.teleopL1, r.teleopL2, r.teleopL3, r.teleopL4, r.teleopNet, r.climbStatus,
-              r.yellowCard ? 1 : 0, r.notes, r.timestamp,
-            ]
-          );
+          try {
+            // Note: event_key removed from column list to match local SQLite schema
+            await db.execute(
+              `INSERT OR REPLACE INTO stand_scout_records 
+              (id, match_number, team_number, scout_name, alliance_color, driver_station_slot, auto_taxi, auto_l1, auto_l2, auto_l3, auto_l4, teleop_l1, teleop_l2, teleop_l3, teleop_l4, teleop_net, climb_status, yellow_card, notes, timestamp)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);`,
+              [
+                r.id,
+                r.matchNumber,
+                r.teamNumber,
+                r.scoutName,
+                r.allianceColor,
+                r.driverStationSlot,
+                r.autoTaxi ? 1 : 0,
+                r.autoL1,
+                r.autoL2,
+                r.autoL3,
+                r.autoL4,
+                r.teleopL1,
+                r.teleopL2,
+                r.teleopL3,
+                r.teleopL4,
+                r.teleopNet,
+                r.climbStatus,
+                r.yellowCard ? 1 : 0,
+                r.notes,
+                r.timestamp,
+              ]
+            );
+          } catch (dbErr: any) {
+            console.error('Error inserting stand record to SQLite:', dbErr);
+            logTransaction(source, `SQLite Insert Error: ${dbErr?.message || dbErr}`, 0, 0, 1);
+          }
         }
         importedCount++;
       }
@@ -298,15 +467,29 @@ export const ImportTab: React.FC = () => {
         upsertPitRecord(pitRecord);
         if (db) {
           const pr = pitRecord as any;
-          await db.execute(
-            `INSERT OR REPLACE INTO pit_scout_records (team_number, event_key, drivetrain, motors, weight, width, length, intake_type, max_coral, can_net, climb_cap, vision, notes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);`,
-            [
-              pr.teamNumber, activeEventKey, pr.drivetrainType, pr.motorType, pr.weightLbs,
-              pr.widthInches, pr.lengthInches, pr.intakeType, pr.maxCoralLevel,
-              pr.canScoreNet ? 1 : 0, pr.climberCapability, pr.hasVision ? 1 : 0, pr.notes,
-            ]
-          );
+          try {
+            await db.execute(
+              `INSERT OR REPLACE INTO pit_scout_records (team_number, event_key, drivetrain, motors, weight, width, length, intake_type, max_coral, can_net, climb_cap, vision, notes)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);`,
+              [
+                pr.teamNumber,
+                activeEventKey,
+                pr.drivetrainType,
+                pr.motorType,
+                pr.weightLbs,
+                pr.widthInches,
+                pr.lengthInches,
+                pr.intakeType,
+                pr.maxCoralLevel,
+                pr.canScoreNet ? 1 : 0,
+                pr.climberCapability,
+                pr.hasVision ? 1 : 0,
+                pr.notes,
+              ]
+            );
+          } catch (dbErr: any) {
+            console.error('Error inserting pit record to SQLite:', dbErr);
+          }
         }
         importedCount++;
       }
@@ -329,29 +512,23 @@ export const ImportTab: React.FC = () => {
     let errorsEncountered = 0;
 
     try {
-      if (autoImportCsv) {
-        const allFilesToImport = [...usbDriveInfo.match_files, ...usbDriveInfo.pit_files];
+      const allFilesToImport = [...usbDriveInfo.match_files, ...usbDriveInfo.pit_files];
 
-        for (const file of allFilesToImport) {
-          try {
-            const filePath = buildFilePath(usbDriveInfo.mount_path, file);
-            const content = await readTextFile(filePath);
-            const count = await ingestRawDataPayload(content, 'USB');
-            totalImported += count;
-          } catch (fileErr) {
-            console.error(`Failed reading USB file ${file}:`, fileErr);
-            errorsEncountered++;
-          }
+      for (const file of allFilesToImport) {
+        try {
+          const filePath = buildFilePath(usbDriveInfo.mount_path, file);
+          const content = await readTextFile(filePath);
+          const count = await ingestRawDataPayload(content, 'USB');
+          totalImported += count;
+        } catch (fileErr) {
+          console.error(`Failed reading USB file ${file}:`, fileErr);
+          errorsEncountered++;
         }
       }
 
-      if (autoCopyPhotos && usbDriveInfo.photo_files.length > 0) {
+      if (usbDriveInfo.photo_files.length > 0) {
         photosCopied = await copyRobotPhotos(usbDriveInfo.mount_path, usbDriveInfo.photo_files);
         logTransaction('USB', `Copied ${photosCopied} robot photo(s) to local app storage.`, 0, photosCopied);
-      }
-
-      if (autoEjectUsb) {
-        logTransaction('USB', `USB drive (${usbDriveInfo.volume_name || usbDriveInfo.mount_path}) safe to remove.`);
       }
 
       logTransaction(
@@ -382,11 +559,12 @@ export const ImportTab: React.FC = () => {
         await ingestRawDataPayload(content, 'Manual');
       }
     } catch (err) {
-      console.error("Dialog error:", err);
+      console.error('Dialog error:', err);
       logTransaction('Manual', `File picker error: ${err}`);
     }
   };
 
+  // Select Folder & Import Images
   const handleSelectPhotosFolder = async () => {
     try {
       const selected = await openDialog({
@@ -394,12 +572,58 @@ export const ImportTab: React.FC = () => {
         multiple: false,
       });
 
-      if (selected && typeof selected === 'string') {
-        logTransaction('Manual', `Mapped photo directory: ${selected}`);
+      if (!selected || typeof selected !== 'string') return;
+
+      setIsProcessingPhotos(true);
+      const appDir = await appDataDir();
+      const targetDir = `${appDir}/robot_photos`;
+
+      const dirExists = await exists(targetDir);
+      if (!dirExists) {
+        await mkdir(targetDir, { recursive: true });
       }
+
+      const entries = await readDir(selected);
+      const validExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif'];
+
+      let copiedCount = 0;
+      let errorCount = 0;
+
+      for (const entry of entries) {
+        if (!entry.name || entry.isDirectory) continue;
+
+        const ext = entry.name.substring(entry.name.lastIndexOf('.')).toLowerCase();
+        if (validExtensions.includes(ext)) {
+          const sourcePath = buildFilePath(selected, entry.name);
+          const destinationPath = `${targetDir}/${entry.name}`;
+
+          try {
+            await copyFile(sourcePath, destinationPath);
+            copiedCount++;
+
+            const teamNum = extractTeamNumberFromFileName(entry.name);
+            if (teamNum) {
+              await saveTeamPhotoReference(teamNum, destinationPath);
+            }
+          } catch (copyErr) {
+            console.error(`Failed copying photo ${entry.name}:`, copyErr);
+            errorCount++;
+          }
+        }
+      }
+
+      logTransaction(
+        'Manual',
+        `Imported ${copiedCount} photo(s) from folder: ${selected}`,
+        0,
+        copiedCount,
+        errorCount
+      );
     } catch (err) {
-      console.error("Dialog error:", err);
-      logTransaction('Manual', `Folder picker error: ${err}`);
+      console.error('Folder selection error:', err);
+      logTransaction('Manual', `Photos folder error: ${err}`, 0, 0, 1);
+    } finally {
+      setIsProcessingPhotos(false);
     }
   };
 
@@ -415,18 +639,63 @@ export const ImportTab: React.FC = () => {
     }
   };
 
-  const handlePhotoDrop = (e: React.DragEvent) => {
+  // Drag & Drop Robot Images Direct Ingestion
+  const handlePhotoDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDragActivePhotos(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+
+    setIsProcessingPhotos(true);
+    let importedCount = 0;
+    let errorCount = 0;
+
+    try {
+      const appDir = await appDataDir();
+      const targetDir = `${appDir}/robot_photos`;
+
+      const dirExists = await exists(targetDir);
+      if (!dirExists) {
+        await mkdir(targetDir, { recursive: true });
+      }
+
       const files = Array.from(e.dataTransfer.files);
-      files.forEach((file) => {
-        if (autoAssignFilename) {
-          const match = file.name.match(/^(\d+)/);
-          const teamNum = match ? match[1] : 'Unknown';
-          logTransaction('File Drop', `Assigned photo ${file.name} to Team ${teamNum}`, 0, 1);
+      const validExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif'];
+
+      for (const file of files) {
+        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+        if (!validExtensions.includes(ext)) continue;
+
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
+          const destinationPath = `${targetDir}/${file.name}`;
+
+          await writeFile(destinationPath, uint8Array);
+          importedCount++;
+
+          const teamNum = extractTeamNumberFromFileName(file.name);
+          if (teamNum) {
+            await saveTeamPhotoReference(teamNum, destinationPath);
+          }
+        } catch (writeErr) {
+          console.error(`Failed writing dropped photo ${file.name}:`, writeErr);
+          errorCount++;
         }
-      });
+      }
+
+      logTransaction(
+        'File Drop',
+        `Directly ingested and saved ${importedCount} robot photo(s) to storage`,
+        0,
+        importedCount,
+        errorCount
+      );
+    } catch (err) {
+      console.error('Error during photo drop processing:', err);
+      logTransaction('File Drop', `Failed processing dropped photos: ${err}`, 0, 0, 1);
+    } finally {
+      setIsProcessingPhotos(false);
     }
   };
 
@@ -456,9 +725,10 @@ export const ImportTab: React.FC = () => {
     );
   };
 
-  const totalUsbAssets = (usbDriveInfo?.match_files.length || 0) +
-                         (usbDriveInfo?.pit_files.length || 0) +
-                         (usbDriveInfo?.photo_files.length || 0);
+  const totalUsbAssets =
+    (usbDriveInfo?.match_files.length || 0) +
+    (usbDriveInfo?.pit_files.length || 0) +
+    (usbDriveInfo?.photo_files.length || 0);
 
   return (
     <div className="p-6 space-y-6 text-txt-main bg-canvas min-h-screen">
@@ -495,7 +765,7 @@ export const ImportTab: React.FC = () => {
         </div>
 
         {/* System Badges */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-border-subtle/60 text-xs font-mono">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-border-subtle/60 text-xs font-mono">
           <div className="bg-canvas border border-border-subtle px-3 py-2 rounded-lg flex items-center justify-between">
             <span className="text-txt-muted">Storage Engine:</span>
             <span className="font-semibold text-txt-main flex items-center gap-1.5">
@@ -507,15 +777,11 @@ export const ImportTab: React.FC = () => {
           <div className="bg-canvas border border-border-subtle px-3 py-2 rounded-lg flex items-center justify-between">
             <span className="text-txt-muted">Match Progress:</span>
             <span className="font-semibold text-txt-main tabular-nums">
-              {scoutedMatchesCount} / {totalMatchesExpected}
-            </span>
-          </div>
-
-          <div className="bg-canvas border border-border-subtle px-3 py-2 rounded-lg flex items-center justify-between">
-            <span className="text-txt-muted">Auto-Backup Status:</span>
-            <span className="font-semibold text-txt-main flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              Snapshot Active
+              {isLoadingMatches ? (
+                <span className="text-txt-muted animate-pulse">Syncing TBA...</span>
+              ) : (
+                `${scoutedMatchesCount} / ${totalMatchesExpected}`
+              )}
             </span>
           </div>
         </div>
@@ -539,18 +805,16 @@ export const ImportTab: React.FC = () => {
             <div className="bg-canvas border border-border-subtle p-3 rounded-lg flex items-center justify-between text-xs">
               <div className="flex items-center gap-2">
                 <div
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    usbDriveInfo?.is_connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
-                  }`}
+                  className={`w-2.5 h-2.5 rounded-full ${usbDriveInfo?.is_connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+                    }`}
                 />
                 <span className="font-mono text-txt-muted truncate max-w-[180px]">
                   {usbDriveInfo?.mount_path || 'No removable drive detected'}
                 </span>
               </div>
               <span
-                className={`text-[10px] font-bold uppercase tracking-wider ${
-                  usbDriveInfo?.is_connected ? 'text-emerald-500' : 'text-amber-500'
-                }`}
+                className={`text-[10px] font-bold uppercase tracking-wider ${usbDriveInfo?.is_connected ? 'text-emerald-500' : 'text-amber-500'
+                  }`}
               >
                 {usbDriveInfo?.is_connected ? usbDriveInfo.volume_name || 'Mounted' : 'Scanning'}
               </span>
@@ -562,7 +826,7 @@ export const ImportTab: React.FC = () => {
                 <span className="font-mono tabular-nums">{totalUsbAssets} files</span>
               </div>
 
-              <div className="bg-canvas rounded-lg border border-border-subtle p-3 space-y-2 max-h-40 overflow-y-auto text-xs font-mono">
+              <div className="bg-canvas rounded-lg border border-border-subtle p-3 space-y-2 max-h-48 overflow-y-auto text-xs font-mono">
                 {!usbDriveInfo || totalUsbAssets === 0 ? (
                   <p className="text-[11px] text-txt-muted text-center py-4">
                     Insert a USB drive containing scouting CSVs or robot images...
@@ -597,44 +861,12 @@ export const ImportTab: React.FC = () => {
                 )}
               </div>
             </div>
-
-            <div className="space-y-2 text-xs border-t border-border-subtle/60 pt-3">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoImportCsv}
-                  onChange={(e) => setAutoImportCsv(e.target.checked)}
-                  className="rounded border-border-subtle"
-                />
-                <span>Auto-import CSVs on insertion</span>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoCopyPhotos}
-                  onChange={(e) => setAutoCopyPhotos(e.target.checked)}
-                  className="rounded border-border-subtle"
-                />
-                <span>Auto-copy new robot photos</span>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoEjectUsb}
-                  onChange={(e) => setAutoEjectUsb(e.target.checked)}
-                  className="rounded border-border-subtle"
-                />
-                <span>Safely eject USB when done</span>
-              </label>
-            </div>
           </div>
 
           <button
             onClick={handleUsbOneTapSync}
             disabled={usbSyncing || !usbDriveInfo}
-            className="w-full bg-txt-main text-canvas font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 text-xs uppercase tracking-wider cursor-pointer"
+            className="w-full bg-txt-main text-canvas font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 text-xs uppercase tracking-wider cursor-pointer mt-4"
           >
             <RefreshCw className={`w-4 h-4 ${usbSyncing ? 'animate-spin' : ''}`} />
             {usbSyncing ? 'Processing Data...' : '📥 One-Tap Import All USB Data'}
@@ -661,13 +893,14 @@ export const ImportTab: React.FC = () => {
               }}
               onDragLeave={() => setDragActiveData(false)}
               onDrop={handleDataDrop}
-              className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center min-h-[170px] transition-colors ${
-                dragActiveData
-                  ? 'border-txt-main bg-canvas'
-                  : 'border-border-subtle bg-canvas hover:border-txt-muted'
-              }`}
+              className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center min-h-[170px] transition-colors ${dragActiveData
+                ? 'border-txt-main bg-canvas'
+                : 'border-border-subtle bg-canvas hover:border-txt-muted'
+                }`}
             >
-              <Upload className={`w-8 h-8 mb-2 ${dragActiveData ? 'scale-110' : 'opacity-60'} transition-transform`} />
+              <Upload
+                className={`w-8 h-8 mb-2 ${dragActiveData ? 'scale-110' : 'opacity-60'} transition-transform`}
+              />
               <p className="text-xs font-semibold text-txt-main">
                 Drag & Drop Scouting Data Payloads
               </p>
@@ -675,15 +908,15 @@ export const ImportTab: React.FC = () => {
                 Supports `.csv`, `.json`, or raw exported txt streams
               </p>
             </div>
-
-            <button
-              onClick={handleSelectDataFileFromDisk}
-              className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <FolderInput className="w-4 h-4" />
-              📄 Select Data File from Disk
-            </button>
           </div>
+
+          <button
+            onClick={handleSelectDataFileFromDisk}
+            className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer mt-4"
+          >
+            <FolderInput className="w-4 h-4" />
+            📄 Select Data File from Disk
+          </button>
         </div>
 
         {/* Panel 3: Robot Photo Ingestion Hub */}
@@ -706,47 +939,28 @@ export const ImportTab: React.FC = () => {
               }}
               onDragLeave={() => setDragActivePhotos(false)}
               onDrop={handlePhotoDrop}
-              className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center min-h-[170px] transition-colors ${
-                dragActivePhotos
-                  ? 'border-txt-main bg-canvas'
-                  : 'border-border-subtle bg-canvas hover:border-txt-muted'
-              }`}
+              className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center text-center min-h-[170px] transition-colors ${dragActivePhotos
+                ? 'border-txt-main bg-canvas'
+                : 'border-border-subtle bg-canvas hover:border-txt-muted'
+                }`}
             >
-              <ImageIcon className={`w-8 h-8 mb-2 ${dragActivePhotos ? 'scale-110' : 'opacity-60'} transition-transform`} />
+              <ImageIcon
+                className={`w-8 h-8 mb-2 ${dragActivePhotos ? 'scale-110' : 'opacity-60'} ${isProcessingPhotos ? 'animate-pulse text-emerald-500' : ''
+                  } transition-transform`}
+              />
               <p className="text-xs font-semibold text-txt-main">
-                Drag & Drop Robot Photos
+                {isProcessingPhotos ? 'Processing & Copying Images...' : 'Drag & Drop Robot Photos'}
               </p>
               <p className="text-[11px] text-txt-muted mt-1">
-                Accepted: `.jpg`, `.png`, `.webp`
+                Accepted: `.jpg`, `.png`, `.webp` (Auto-tags team #)
               </p>
-            </div>
-
-            <div className="space-y-2 text-xs border-t border-border-subtle/60 pt-2">
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={autoAssignFilename}
-                  onChange={(e) => setAutoAssignFilename(e.target.checked)}
-                  className="rounded border-border-subtle"
-                />
-                <span>Auto-assign via filename (`254.jpg`)</span>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={compressImages}
-                  onChange={(e) => setCompressImages(e.target.checked)}
-                  className="rounded border-border-subtle"
-                />
-                <span>Compress high-res images for speed</span>
-              </label>
             </div>
           </div>
 
           <button
             onClick={handleSelectPhotosFolder}
-            className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer"
+            disabled={isProcessingPhotos}
+            className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer mt-4 disabled:opacity-50"
           >
             <FolderOpen className="w-4 h-4" />
             📂 Select Photos Folder...
@@ -781,7 +995,8 @@ export const ImportTab: React.FC = () => {
               >
                 <div className="flex justify-between items-center text-xs font-mono border-b border-border-subtle/60 pb-2">
                   <span className="font-bold text-txt-main">
-                    Collision: Match {(conflict as any).matchNumber} &bull; Team {(conflict as any).teamNumber}
+                    Collision: Match {(conflict as any).matchNumber} &bull; Team{' '}
+                    {(conflict as any).teamNumber}
                   </span>
                   <span className="text-txt-muted text-[10px] tabular-nums">
                     Logged: {new Date((conflict as any).timestamp || Date.now()).toLocaleTimeString()}
@@ -794,12 +1009,22 @@ export const ImportTab: React.FC = () => {
                     <div className="text-[10px] font-sans font-bold uppercase text-txt-muted">
                       Record A (Existing Store Record)
                     </div>
-                    <div>Scout: <span className="font-bold text-txt-main">{(conflict.recordA as any)?.scoutName || 'Unknown'}</span></div>
-                    <div className="tabular-nums">
-                      Auto L1-L4: {(conflict.recordA as any)?.autoL1 || 0} / {(conflict.recordA as any)?.autoL2 || 0} / {(conflict.recordA as any)?.autoL3 || 0} / {(conflict.recordA as any)?.autoL4 || 0}
+                    <div>
+                      Scout:{' '}
+                      <span className="font-bold text-txt-main">
+                        {(conflict.recordA as any)?.scoutName || 'Unknown'}
+                      </span>
                     </div>
                     <div className="tabular-nums">
-                      TeleOp L1-L4: {(conflict.recordA as any)?.teleopL1 || 0} / {(conflict.recordA as any)?.teleopL2 || 0} / {(conflict.recordA as any)?.teleopL3 || 0} / {(conflict.recordA as any)?.teleopL4 || 0}
+                      Auto L1-L4: {(conflict.recordA as any)?.autoL1 || 0} /{' '}
+                      {(conflict.recordA as any)?.autoL2 || 0} / {(conflict.recordA as any)?.autoL3 || 0}{' '}
+                      / {(conflict.recordA as any)?.autoL4 || 0}
+                    </div>
+                    <div className="tabular-nums">
+                      TeleOp L1-L4: {(conflict.recordA as any)?.teleopL1 || 0} /{' '}
+                      {(conflict.recordA as any)?.teleopL2 || 0} /{' '}
+                      {(conflict.recordA as any)?.teleopL3 || 0} /{' '}
+                      {(conflict.recordA as any)?.teleopL4 || 0}
                     </div>
 
                     <button
@@ -818,12 +1043,22 @@ export const ImportTab: React.FC = () => {
                     <div className="text-[10px] font-sans font-bold uppercase text-txt-muted">
                       Record B (Incoming Payload)
                     </div>
-                    <div>Scout: <span className="font-bold text-txt-main">{(conflict.recordB as any)?.scoutName || 'Unknown'}</span></div>
-                    <div className="tabular-nums">
-                      Auto L1-L4: {(conflict.recordB as any)?.autoL1 || 0} / {(conflict.recordB as any)?.autoL2 || 0} / {(conflict.recordB as any)?.autoL3 || 0} / {(conflict.recordB as any)?.autoL4 || 0}
+                    <div>
+                      Scout:{' '}
+                      <span className="font-bold text-txt-main">
+                        {(conflict.recordB as any)?.scoutName || 'Unknown'}
+                      </span>
                     </div>
                     <div className="tabular-nums">
-                      TeleOp L1-L4: {(conflict.recordB as any)?.teleopL1 || 0} / {(conflict.recordB as any)?.teleopL2 || 0} / {(conflict.recordB as any)?.teleopL3 || 0} / {(conflict.recordB as any)?.teleopL4 || 0}
+                      Auto L1-L4: {(conflict.recordB as any)?.autoL1 || 0} /{' '}
+                      {(conflict.recordB as any)?.autoL2 || 0} / {(conflict.recordB as any)?.autoL3 || 0}{' '}
+                      / {(conflict.recordB as any)?.autoL4 || 0}
+                    </div>
+                    <div className="tabular-nums">
+                      TeleOp L1-L4: {(conflict.recordB as any)?.teleopL1 || 0} /{' '}
+                      {(conflict.recordB as any)?.teleopL2 || 0} /{' '}
+                      {(conflict.recordB as any)?.teleopL3 || 0} /{' '}
+                      {(conflict.recordB as any)?.teleopL4 || 0}
                     </div>
 
                     <button
@@ -871,7 +1106,21 @@ export const ImportTab: React.FC = () => {
             <History className="w-5 h-5" />
             Recent Sync History
           </h2>
-          <span className="text-xs text-txt-muted font-mono tabular-nums">{syncLogs.length} events logged</span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-txt-muted font-mono tabular-nums">
+              {syncLogs.length} events logged
+            </span>
+            {syncLogs.length > 0 && (
+              <button
+                onClick={handleClearSyncLogs}
+                className="text-xs text-txt-muted hover:text-red-500 transition-colors flex items-center gap-1 cursor-pointer"
+                title="Clear Sync History"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Clear Logs
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="bg-canvas border border-border-subtle rounded-lg p-3 max-h-52 overflow-y-auto space-y-2">
@@ -887,7 +1136,9 @@ export const ImportTab: React.FC = () => {
                   <span className="text-[10px] bg-card border border-border-subtle px-1.5 py-0.5 rounded text-txt-muted">
                     {(log as any).source || (log as any).type || (log as any).action || 'Log'}
                   </span>
-                  <span className="text-txt-main">{(log as any).details || (log as any).message || ''}</span>
+                  <span className="text-txt-main">
+                    {(log as any).details || (log as any).message || ''}
+                  </span>
                 </div>
                 <span className="text-txt-muted text-[10px] tabular-nums">
                   {typeof log.timestamp === 'number'

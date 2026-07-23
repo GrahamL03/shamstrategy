@@ -14,12 +14,66 @@ export async function initDb(): Promise<Database | null> {
   }
 
   if (!dbInstance) {
-    // 1. Load database & run initial schema migration
+    // 1. Load database
     dbInstance = await Database.load('sqlite:shamstrategy.db');
 
-    // 2. Set runtime connection PRAGMAs AFTER migrations complete
+    // 2. Set runtime connection PRAGMAs
     await dbInstance.execute('PRAGMA foreign_keys = ON;');
     await dbInstance.execute('PRAGMA journal_mode = WAL;');
+
+    // 3. Ensure core database tables exist
+    await dbInstance.execute(`
+      CREATE TABLE IF NOT EXISTS stand_scout_records (
+        id TEXT PRIMARY KEY,
+        match_number INTEGER NOT NULL,
+        team_number INTEGER NOT NULL,
+        alliance_color INTEGER,
+        auto_taxi INTEGER,
+        auto_l1 INTEGER,
+        auto_l2 INTEGER,
+        auto_l3 INTEGER,
+        auto_l4 INTEGER,
+        teleop_l1 INTEGER,
+        teleop_l2 INTEGER,
+        teleop_l3 INTEGER,
+        teleop_l4 INTEGER,
+        teleop_net INTEGER,
+        climb_status TEXT,
+        yellow_card INTEGER,
+        notes TEXT,
+        scout_name TEXT,
+        timestamp INTEGER
+      );
+    `);
+
+    await dbInstance.execute(`
+      CREATE TABLE IF NOT EXISTS pit_scout_records (
+        team_number INTEGER PRIMARY KEY,
+        event_key TEXT,
+        drivetrain TEXT,
+        motors TEXT,
+        weight REAL,
+        width REAL,
+        length REAL,
+        intake_type TEXT,
+        max_coral TEXT,
+        can_net INTEGER,
+        climb_cap TEXT,
+        vision INTEGER,
+        notes TEXT,
+        photo_url TEXT
+      );
+    `);
+
+    await dbInstance.execute(`
+      CREATE TABLE IF NOT EXISTS schedule_matches (
+        id TEXT PRIMARY KEY,
+        event_key TEXT,
+        match_number INTEGER NOT NULL,
+        red_teams TEXT,
+        blue_teams TEXT
+      );
+    `);
   }
 
   return dbInstance;

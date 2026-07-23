@@ -13,7 +13,6 @@ pub struct UsbDeviceInfo {
     pub photo_files: Vec<String>,
 }
 
-// Removed `pub` here to prevent macro symbol collision in lib.rs
 #[tauri::command]
 fn detect_usb_drives() -> Vec<UsbDeviceInfo> {
     let mut detected_drives = Vec::new();
@@ -23,7 +22,6 @@ fn detect_usb_drives() -> Vec<UsbDeviceInfo> {
         let mount_point = disk.mount_point();
         let mount_str = mount_point.to_string_lossy().to_string();
 
-        // Filter for removable media across Windows, macOS, and Linux
         let is_removable = disk.is_removable()
             || mount_str.contains("/media/")
             || mount_str.contains("/Volumes/")
@@ -96,6 +94,9 @@ pub fn run() {
     ];
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())  // <--- Added Dialog plugin
+        .plugin(tauri_plugin_opener::init())  // <--- Added Opener plugin
+        .plugin(tauri_plugin_fs::init())      // <--- Added FS plugin
         .plugin(
             SqlBuilder::default()
                 .add_migrations("sqlite:shamstrategy.db", migrations)
