@@ -2,17 +2,32 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default permissions for ShamStrategy Node E",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
     "sql:default",
     {
       "identifier": "sql:allow-execute",
-      "allow": [{ "path": "sqlite:shamstrategy.db" }]
+      "allow": [
+        {
+          "path": "sqlite:shamstrategy.db"
+        }
+      ]
     },
     {
       "identifier": "sql:allow-load",
-      "allow": [{ "path": "sqlite:shamstrategy.db" }]
+      "allow": [
+        {
+          "path": "sqlite:shamstrategy.db"
+        }
+      ]
     }
   ]
 }

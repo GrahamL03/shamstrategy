@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { AppShell } from './components/layouts/AppShell';
 import { useEventStore } from './store';
-import { initDb } from './lib/db.ts';
+import { initDb } from './lib/db';
 import { Loader2, AlertCircle } from 'lucide-react';
+import { SettingsTab } from './components/tabs/SettingsTab';
 
 // Placeholder view wrappers for active tabs
 // (These can be replaced with full view components as they are built)
@@ -15,7 +16,6 @@ const CheatsheetView = () => <div className="p-4 bg-card rounded-lg border borde
 const PicklistView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Playoff Picklist View</div>;
 const AiAssistantView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">AI Strategy Assistant ("Frank") View</div>;
 const SyncHubView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">USB Data Sync Hub View</div>;
-const SettingsView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">System Settings View</div>;
 
 export const App: React.FC = () => {
   const [dbReady, setDbReady] = useState(false);
@@ -100,7 +100,7 @@ export const App: React.FC = () => {
       case 'sync_hub':
         return <SyncHubView />;
       case 'settings':
-        return <SettingsView />;
+        return <SettingsTab />;
       default:
         return <DashboardView />;
     }

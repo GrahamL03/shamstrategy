@@ -1,49 +1,44 @@
 -- ============================================================================
 -- ShamStrategy Node E - Database Schema DDL
 -- Team: FRC 5907 CC Shambots
--- Database: shamstrategy.db (SQLite)
--- Note: Do NOT include PRAGMA statements in this file.
 -- ============================================================================
 
--- 1. SCOUT USERS (Roster & Activity Tracking)
 CREATE TABLE IF NOT EXISTS scout_users (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   scoutCode TEXT NOT NULL UNIQUE,
-  assignedSlot TEXT, -- e.g. 'Red 1', 'Blue 3'
+  assignedSlot TEXT,
   isActive INTEGER NOT NULL DEFAULT 1,
   totalScoutedMatches INTEGER NOT NULL DEFAULT 0,
   createdAt TEXT NOT NULL
 );
 
--- 2. TEAMS (Pit Scouting Specs & Aggregates)
 CREATE TABLE IF NOT EXISTS teams (
   teamNumber INTEGER PRIMARY KEY,
   teamName TEXT NOT NULL,
-  drivetrainType TEXT, -- 'Swerve', 'Tank', etc.
+  drivetrainType TEXT,
   swerveMotorType TEXT,
   robotWeightLbs REAL,
   frameWidthInches REAL,
   frameLengthInches REAL,
-  intakeTypes TEXT, -- JSON array string
+  intakeTypes TEXT,
   maxCoralCapacity INTEGER DEFAULT 0,
   maxAlgaeCapacity INTEGER DEFAULT 0,
   climberType TEXT,
   canClimbShallow INTEGER DEFAULT 0,
   canClimbDeep INTEGER DEFAULT 0,
-  autonStartPositions TEXT, -- JSON array string
+  autonStartPositions TEXT,
   pitNotes TEXT,
-  photoPaths TEXT, -- JSON array string of photo paths
+  photoPaths TEXT,
   updatedAt TEXT NOT NULL
 );
 
--- 3. STAND SCOUT RECORDS (Match Scouting Payload)
 CREATE TABLE IF NOT EXISTS stand_scout_records (
   id TEXT PRIMARY KEY,
   matchNumber INTEGER NOT NULL,
   teamNumber INTEGER NOT NULL,
   scoutId TEXT NOT NULL,
-  scoutSlot TEXT NOT NULL, -- 'Red 1', 'Red 2', 'Red 3', 'Blue 1', 'Blue 2', 'Blue 3'
+  scoutSlot TEXT NOT NULL,
   
   -- Auto Phase
   autoTaxi INTEGER DEFAULT 0,
@@ -63,7 +58,7 @@ CREATE TABLE IF NOT EXISTS stand_scout_records (
   teleopAlgaeRemoved INTEGER DEFAULT 0,
   teleopAlgaeScoredNet INTEGER DEFAULT 0,
   teleopAlgaeScoredProcessor INTEGER DEFAULT 0,
-  defenseRating INTEGER DEFAULT 0, -- 1 to 5 scale
+  defenseRating INTEGER DEFAULT 0,
 
   -- Endgame Phase
   bargeParked INTEGER DEFAULT 0,
@@ -71,32 +66,28 @@ CREATE TABLE IF NOT EXISTS stand_scout_records (
   deepClimb INTEGER DEFAULT 0,
   climbFailed INTEGER DEFAULT 0,
 
-  -- Post-Match / Subjective
+  -- Post-Match
   foulsCommitted INTEGER DEFAULT 0,
-  driverSkillRating INTEGER DEFAULT 0, -- 1 to 5 scale
+  driverSkillRating INTEGER DEFAULT 0,
   diedOrTipped INTEGER DEFAULT 0,
   notes TEXT,
-  rawPayload TEXT, -- Raw JSON backup
+  rawPayload TEXT,
 
   timestamp TEXT NOT NULL,
   FOREIGN KEY (scoutId) REFERENCES scout_users(id) ON DELETE SET NULL,
   FOREIGN KEY (teamNumber) REFERENCES teams(teamNumber) ON DELETE CASCADE,
-  
-  -- Prevent duplicate entries from the same scout for the same team in a match
   UNIQUE(matchNumber, teamNumber, scoutId)
 );
 
--- 4. QUALITATIVE TAGS (Quick Strategy Tags)
 CREATE TABLE IF NOT EXISTS qualitative_tags (
   id TEXT PRIMARY KEY,
   teamNumber INTEGER NOT NULL,
-  tag TEXT NOT NULL, -- e.g. 'Tipper', 'Fast Intake', 'Defense Beast'
+  tag TEXT NOT NULL,
   createdByName TEXT NOT NULL,
   createdAt TEXT NOT NULL,
   FOREIGN KEY (teamNumber) REFERENCES teams(teamNumber) ON DELETE CASCADE
 );
 
--- 5. SCHEDULE MATCHES (Event Schedule & Status)
 CREATE TABLE IF NOT EXISTS schedule_matches (
   matchNumber INTEGER PRIMARY KEY,
   eventKey TEXT NOT NULL,
@@ -108,11 +99,10 @@ CREATE TABLE IF NOT EXISTS schedule_matches (
   blue3 INTEGER NOT NULL,
   redScore INTEGER,
   blueScore INTEGER,
-  status TEXT NOT NULL DEFAULT 'scheduled', -- 'scheduled', 'in_progress', 'completed'
-  scoutedSlots TEXT -- JSON object string tracking slot scout statuses
+  status TEXT NOT NULL DEFAULT 'scheduled',
+  scoutedSlots TEXT
 );
 
--- 6. SHIFT ASSIGNMENTS (Scout Slot Rotation)
 CREATE TABLE IF NOT EXISTS shift_assignments (
   id TEXT PRIMARY KEY,
   scoutId TEXT NOT NULL,
@@ -122,16 +112,14 @@ CREATE TABLE IF NOT EXISTS shift_assignments (
   FOREIGN KEY (scoutId) REFERENCES scout_users(id) ON DELETE CASCADE
 );
 
--- 7. PICKLIST GROUPS (Alliance Selection Tiers)
 CREATE TABLE IF NOT EXISTS picklist_groups (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  weightsJson TEXT NOT NULL, -- JSON weights object
+  weightsJson TEXT NOT NULL,
   createdAt TEXT NOT NULL,
   updatedAt TEXT NOT NULL
 );
 
--- 8. PICKLIST ITEMS (Ranked Teams per Group)
 CREATE TABLE IF NOT EXISTS picklist_items (
   id TEXT PRIMARY KEY,
   groupId TEXT NOT NULL,
@@ -146,43 +134,26 @@ CREATE TABLE IF NOT EXISTS picklist_items (
   FOREIGN KEY (teamNumber) REFERENCES teams(teamNumber) ON DELETE CASCADE
 );
 
--- 9. SYNC LOGS & AUDIT TRAILS
 CREATE TABLE IF NOT EXISTS sync_logs (
   id TEXT PRIMARY KEY,
-  source TEXT NOT NULL, -- 'USB', 'QR', 'CSV', 'Manual'
+  source TEXT NOT NULL,
   recordsImported INTEGER NOT NULL,
   conflictsDetected INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL, -- 'success', 'partial', 'failed'
+  status TEXT NOT NULL,
   timestamp TEXT NOT NULL
 );
 
--- 10. CONFLICT RECORDS (For Tab 9 Data Resolution)
 CREATE TABLE IF NOT EXISTS conflicts (
   id TEXT PRIMARY KEY,
   matchNumber INTEGER NOT NULL,
   teamNumber INTEGER NOT NULL,
   slot TEXT NOT NULL,
-  recordA TEXT NOT NULL, -- JSON string of StandScoutRecord A
-  recordB TEXT NOT NULL, -- JSON string of StandScoutRecord B
+  recordA TEXT NOT NULL,
+  recordB TEXT NOT NULL,
   createdAt TEXT NOT NULL
 );
 
--- ============================================================================
--- QUERY OPTIMIZATION INDEXES
--- ============================================================================
-
--- Fast lookup for team performance across matches
-CREATE INDEX IF NOT EXISTS idx_stand_scout_match_team 
-ON stand_scout_records(matchNumber, teamNumber);
-
--- Fast lookup for qualitative tags per team
-CREATE INDEX IF NOT EXISTS idx_qualitative_tags_team 
-ON qualitative_tags(teamNumber);
-
--- Fast lookup for picklist items in active group
-CREATE INDEX IF NOT EXISTS idx_picklist_items_group_rank 
-ON picklist_items(groupId, rankOrder);
-
--- Fast lookup for pending conflicts
-CREATE INDEX IF NOT EXISTS idx_conflicts_match_team 
-ON conflicts(matchNumber, teamNumber);
+CREATE INDEX IF NOT EXISTS idx_stand_scout_match_team ON stand_scout_records(matchNumber, teamNumber);
+CREATE INDEX IF NOT EXISTS idx_qualitative_tags_team ON qualitative_tags(teamNumber);
+CREATE INDEX IF NOT EXISTS idx_picklist_items_group_rank ON picklist_items(groupId, rankOrder);
+CREATE INDEX IF NOT EXISTS idx_conflicts_match_team ON conflicts(matchNumber, teamNumber);

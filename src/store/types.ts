@@ -1,11 +1,3 @@
-/**
- * ShamStrategy - Zustand Store Signatures
- * Application: ShamStrategy (Node E Desktop App)
- * Team: FRC 5907 CC Shambots
- *
- * Defines state models and actions for all Zustand global stores.
- */
-
 import {
   AppTab,
   AppTheme,
@@ -27,6 +19,8 @@ import {
   SyncLogEntry,
 } from '../types';
 
+export type ThemePreset = AppTheme;
+
 // ============================================================================
 // 1. EVENT & NAVIGATION STORE (`useEventStore`)
 // ============================================================================
@@ -39,6 +33,13 @@ export interface EventState {
   selectedTeamNumber: number | null;
   selectedMatchNumber: number | null;
 
+  // Section 1: Team & Event Profile Configuration
+  teamNumber: string;
+  teamName: string;
+  eventName: string;
+  tbaApiKey: string;
+  teamLogo: string | null;
+
   // System Diagnostics
   systemStatus: SystemStatus;
 
@@ -46,7 +47,7 @@ export interface EventState {
   teams: TeamPitData[];
   schedule: ScheduleMatch[];
 
-  // Actions
+  // Navigation Actions
   setActiveTab: (tab: AppTab) => void;
   setActiveTheme: (theme: AppTheme) => void;
   setActiveEventKey: (eventKey: string) => void;
@@ -60,6 +61,13 @@ export interface EventState {
     status: ScheduleMatch['status'],
     scoutedSlots?: ScheduleMatch['scoutedSlots']
   ) => void;
+
+  // Section 1 Profile Setters
+  setTeamNumber: (teamNumber: string) => void;
+  setTeamName: (teamName: string) => void;
+  setEventName: (eventName: string) => void;
+  setTbaApiKey: (tbaApiKey: string) => void;
+  setTeamLogo: (teamLogo: string | null) => void;
 }
 
 // ============================================================================
@@ -67,31 +75,21 @@ export interface EventState {
 // ============================================================================
 
 export interface ScoutState {
-  // Ingested Data
   standRecords: StandScoutRecord[];
-  pitRecords: Record<number, TeamPitData>; // Indexed by teamNumber
-
-  // Scout Management & Shift Operations
+  pitRecords: Record<number, TeamPitData>;
   scoutUsers: ScoutUser[];
   shiftAssignments: ShiftAssignment[];
-
-  // Data Ingestion & Conflict Queue
   conflicts: ConflictRecord[];
   syncLogs: SyncLogEntry[];
 
-  // Actions
   addStandRecord: (record: StandScoutRecord) => void;
   bulkAddStandRecords: (records: StandScoutRecord[]) => void;
   upsertPitRecord: (record: TeamPitData) => void;
-  
-  // Scout Shift Actions
   setScoutUsers: (users: ScoutUser[]) => void;
-  addScoutUser: (name: string) => void;
+  addScoutUser: (user: string | Omit<ScoutUser, 'id'>) => void; // Accepts either name string or partial ScoutUser
   toggleScoutActive: (id: string) => void;
   setShiftAssignments: (shifts: ShiftAssignment[]) => void;
   updateShiftAssignment: (shift: ShiftAssignment) => void;
-
-  // Conflict & Log Actions
   addConflict: (conflict: ConflictRecord) => void;
   resolveConflict: (conflictId: string, chosenRecord: StandScoutRecord) => void;
   addSyncLog: (log: SyncLogEntry) => void;
@@ -102,20 +100,12 @@ export interface ScoutState {
 // ============================================================================
 
 export interface PredictorState {
-  // Active Matchup Context
   redAllianceTeams: [number, number, number];
   blueAllianceTeams: [number, number, number];
-
-  // Custom Weighting Sliders
   modelWeights: ModelWeights;
-
-  // Scenario Sandbox Simulations
-  simulatedRobotStates: Record<number, SimulatedRobotState>; // Indexed by teamNumber
-
-  // Computed Output
+  simulatedRobotStates: Record<number, SimulatedRobotState>;
   activePrediction: MatchPredictionResult | null;
 
-  // Actions
   setRedAlliance: (teams: [number, number, number]) => void;
   setBlueAlliance: (teams: [number, number, number]) => void;
   setModelWeights: (weights: Partial<ModelWeights>) => void;
@@ -132,17 +122,11 @@ export interface PredictorState {
 // ============================================================================
 
 export interface PicklistState {
-  // Groups and Custom Ranking Lists
   groups: PicklistGroup[];
   activeGroupId: string | null;
-
-  // Global DNP Locks
   dnpTeamNumbers: number[];
-
-  // Dynamic Draft Room Weights
   globalWeights: PicklistWeights;
 
-  // Actions
   setGroups: (groups: PicklistGroup[]) => void;
   setActiveGroup: (groupId: string) => void;
   reorderPicklistItems: (groupId: string, items: PicklistItem[]) => void;
@@ -161,18 +145,11 @@ export interface PicklistState {
 // ============================================================================
 
 export interface AIState {
-  // Config & State
-  settings: AISettings;
-  isGenerating: boolean;
-  connected: boolean;
+  provider: 'ollama' | 'llamacpp';
+  model: string;
+  isProcessing: boolean;
 
-  // Chat Log
-  messages: ChatMessage[];
-
-  // Actions
-  updateSettings: (settings: Partial<AISettings>) => void;
-  addMessage: (message: ChatMessage) => void;
-  setIsGenerating: (generating: boolean) => void;
-  setConnected: (connected: boolean) => void;
-  clearChat: () => void;
+  setProvider: (provider: 'ollama' | 'llamacpp') => void;
+  setModel: (model: string) => void;
+  setIsProcessing: (isProcessing: boolean) => void;
 }

@@ -1,12 +1,17 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 
+// https://vitejs.dev/config/
 export default defineConfig({
-  // ... your existing config
+  plugins: [
+    react(),
+    tailwindcss(),
+  ],
+  // Prevent Vite from watching Rust build files and locking on .dll generation
   server: {
-    port: 5173, // make sure your port matches tauri.conf.json
     watch: {
-      // Tell Vite to ignore watching the Rust target directory
       ignored: ['**/src-tauri/**'],
     },
   },
-})
+});

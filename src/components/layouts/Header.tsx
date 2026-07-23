@@ -1,92 +1,161 @@
-import React from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Search, Minus, Square, X, Usb, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
 import { useEventStore } from '../../store';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { 
+  Shield, 
+  Wifi, 
+  Search, 
+  Minus, 
+  Square, 
+  Copy, 
+  X 
+} from 'lucide-react';
 
-interface HeaderProps {
-  onOpenCommandPalette: () => void;
-}
-
-export const Header: React.FC<HeaderProps> = ({ onOpenCommandPalette }) => {
-  const activeEventKey = useEventStore((state) => state.activeEventKey);
+export const Header: React.FC = () => {
   const systemStatus = useEventStore((state) => state.systemStatus);
+  const teamNumber = useEventStore((state) => state.teamNumber);
+  const teamName = useEventStore((state) => state.teamName);
+  const eventName = useEventStore((state) => state.eventName);
+  const teamLogo = useEventStore((state) => state.teamLogo); // 👈 Retrieve team logo
+
+  const [isMaximized, setIsMaximized] = useState(false);
+  const [isOnline, setIsOnline] = useState(
+    typeof window !== 'undefined' ? navigator.onLine : true
+  );
 
   const appWindow = getCurrentWindow();
 
+  // Sync window maximize state
+  useEffect(() => {
+    const updateMaximizeState = async () => {
+      const maximized = await appWindow.isMaximized();
+      setIsMaximized(maximized);
+    };
+
+    updateMaximizeState();
+
+    const unlisten = appWindow.onResized(() => {
+      updateMaximizeState();
+    });
+
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, [appWindow]);
+
+  const handleHeaderMouseDown = async (e: React.MouseEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
+
+    if (e.detail === 2) {
+      await appWindow.toggleMaximize();
+      setIsMaximized(await appWindow.isMaximized());
+    } else {
+      await appWindow.startDragging();
+    }
+  };
+
+  const handleMinimize = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await appWindow.minimize();
+  };
+
+  const handleToggleMaximize = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await appWindow.toggleMaximize();
+    setIsMaximized(await appWindow.isMaximized());
+  };
+
+  const handleClose = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await appWindow.close();
+  };
+
+  const connectionActive = 
+    (systemStatus as any)?.isConnected ?? 
+    (systemStatus as any)?.isOnline ?? 
+    isOnline;
+
   return (
-    <header className="h-10 border-b border-border-subtle bg-card flex items-center justify-between px-3 select-none text-xs text-txt-main">
-      {/* Left Group */}
-      <div className="flex items-center gap-2.5">
-        <div className="flex items-center gap-1.5 font-bold tracking-tight">
-          <div className="w-5 h-5 rounded bg-brand text-txt-main flex items-center justify-center text-[10px] font-extrabold shadow-sm">
-            <ShieldCheck className="w-3.5 h-3.5" />
+    <header 
+      onMouseDown={handleHeaderMouseDown}
+      className="relative h-10 bg-card border-b border-border-subtle flex items-center justify-between px-3 select-none cursor-default"
+    >
+      {/* Left Region */}
+      <div className="flex items-center gap-3 pointer-events-none">
+        {/* Dynamic Logo or Shield Fallback */}
+        {teamLogo ? (
+          <div className="flex items-center gap-1.5 bg-brand/10 border border-brand/20 px-1.5 py-0.5 rounded h-6">
+            <img 
+              src={teamLogo} 
+              alt="Team Logo" 
+              className="h-4 w-auto object-contain max-w-[24px]" 
+            />
+            <span className="text-xs font-bold text-brand font-mono">{teamNumber}</span>
           </div>
-          <span className="font-bold tabular-nums text-sm tracking-wider">5907</span>
-        </div>
+        ) : (
+          <div className="flex items-center gap-1.5 bg-brand/10 border border-brand/20 px-2 py-0.5 rounded">
+            <Shield className="w-3.5 h-3.5 text-brand" />
+            <span className="text-xs font-bold text-brand font-mono">{teamNumber}</span>
+          </div>
+        )}
 
-        <div className="h-3.5 w-px bg-border-subtle" />
-
-        {/* Active Event Key */}
-        <span className="tabular-nums font-mono px-2 py-0.5 rounded bg-card-hover text-txt-muted border border-border-subtle text-[11px]">
-          {activeEventKey || systemStatus.activeEventKey || '2026mifor'}
+        {/* Display Event Name in header */}
+        <span className="text-xs font-mono text-txt-muted bg-canvas px-2 py-0.5 rounded border border-border-subtle max-w-[200px] truncate">
+          {eventName || 'No Active Event'}
         </span>
 
-        {/* USB Status Indicator */}
-        <div className="flex items-center gap-1.5 text-[11px] px-1.5 py-0.5 rounded bg-card-hover border border-border-subtle">
-          <Usb
-            className={`w-3.5 h-3.5 ${
-              systemStatus.usbConnected ? 'text-status-success' : 'text-status-critical'
-            }`}
+        <div className="flex items-center gap-1.5 text-[11px] font-mono text-txt-muted">
+          <span 
+            className={`w-2 h-2 rounded-full ${
+              connectionActive 
+                ? 'bg-status-success animate-pulse' 
+                : 'bg-status-critical'
+            }`} 
           />
-          <span className="tabular-nums font-medium">
-            {systemStatus.usbConnected ? '🟢 Connected' : '🔴 Disconnected'}
-          </span>
+          <Wifi className="w-3 h-3 text-txt-muted" />
+          <span>{connectionActive ? 'Connected' : 'Offline'}</span>
         </div>
       </div>
 
-      {/* Center Drag Region */}
-      <div
-        data-tauri-drag-region
-        className="flex-1 h-full cursor-grab active:cursor-grabbing flex items-center justify-center text-[11px] text-txt-muted font-mono"
-      >
-        <span>ShamStrategy Node E • FRC 5907 CC Shambots</span>
+      {/* Center Region (True-centered via absolute positioning) */}
+      <div className="absolute left-1/2 -translate-x-1/2 text-xs font-mono text-txt-muted pointer-events-none truncate max-w-[35%] text-center">
+        ShamStrategy • {teamNumber} {teamName}
       </div>
 
-      {/* Right Group */}
-      <div className="flex items-center gap-2">
-        {/* Command Palette Trigger */}
-        <button
-          onClick={onOpenCommandPalette}
-          className="flex items-center gap-2 px-2.5 py-1 rounded bg-card-hover hover:border-brand text-txt-muted hover:text-txt-main border border-border-subtle transition-all"
+      {/* Right Region */}
+      <div className="flex items-center gap-2" onMouseDown={(e) => e.stopPropagation()}>
+        <button 
+          className="flex items-center gap-2 bg-canvas hover:bg-card-hover border border-border-subtle px-2 py-1 rounded text-xs text-txt-muted transition-colors cursor-pointer"
         >
-          <Search className="w-3 h-3 text-brand" />
-          <span className="text-[11px]">Search</span>
-          <kbd className="tabular-nums font-mono text-[9px] bg-canvas border border-border-subtle px-1 rounded text-txt-muted">
-            Ctrl+K
-          </kbd>
+          <Search className="w-3.5 h-3.5" />
+          <span className="text-[10px]">Search</span>
+          <kbd className="text-[9px] bg-card px-1 rounded border border-border-subtle font-mono">Ctrl+K</kbd>
         </button>
 
-        <div className="h-3.5 w-px bg-border-subtle" />
-
-        {/* Native Window Controls */}
-        <div className="flex items-center -mr-1">
+        <div className="flex items-center ml-1 border-l border-border-subtle pl-1">
           <button
-            onClick={() => appWindow.minimize()}
-            className="p-1.5 hover:bg-card-hover text-txt-muted hover:text-txt-main rounded transition-colors"
+            onClick={handleMinimize}
+            className="p-1.5 text-txt-muted hover:text-txt-main hover:bg-card-hover rounded transition-colors cursor-pointer"
             title="Minimize"
           >
             <Minus className="w-3.5 h-3.5" />
           </button>
+          
           <button
-            onClick={() => appWindow.toggleMaximize()}
-            className="p-1.5 hover:bg-card-hover text-txt-muted hover:text-txt-main rounded transition-colors"
-            title="Maximize"
+            onClick={handleToggleMaximize}
+            className="p-1.5 text-txt-muted hover:text-txt-main hover:bg-card-hover rounded transition-colors cursor-pointer"
+            title={isMaximized ? "Restore Down" : "Maximize"}
           >
-            <Square className="w-3 h-3" />
+            {isMaximized ? (
+              <Copy className="w-3 h-3 rotate-180" />
+            ) : (
+              <Square className="w-3 h-3" />
+            )}
           </button>
+
           <button
-            onClick={() => appWindow.close()}
-            className="p-1.5 hover:bg-status-critical hover:text-txt-main text-txt-muted rounded transition-colors"
+            onClick={handleClose}
+            className="p-1.5 text-txt-muted hover:text-white hover:bg-status-critical rounded transition-colors cursor-pointer"
             title="Close"
           >
             <X className="w-3.5 h-3.5" />
