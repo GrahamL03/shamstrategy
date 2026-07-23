@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   FolderOpen,
   ShieldCheck,
@@ -8,30 +8,39 @@ import {
   Image as ImageIcon,
   Upload,
   FolderInput,
-  CheckCircle2,
-  Eject,
   RefreshCw,
-  AlertTriangle,
   History,
   ShieldAlert,
-  ArrowRight,
-  Sparkles,
-  Sliders,
-  Check,
-  Edit2,
   Scale,
+  Edit2,
 } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
-import { openPath } from '@tauri-apps/plugin-shell';
+import { openPath } from '@tauri-apps/plugin-opener';
 import { appDataDir } from '@tauri-apps/api/path';
+import { readTextFile, copyFile, mkdir, exists } from '@tauri-apps/plugin-fs';
 import { useEventStore, useScoutStore } from '../../store';
 import { getDb } from '../../lib/db';
 import { StandScoutRecord, TeamPitData, ConflictRecord, SyncLogEntry } from '../../types';
 
+// Rust USB Command Result Type Interface
+interface UsbScanResult {
+  is_connected: boolean;
+  mount_path: string;
+  volume_name: string;
+  match_files: string[];
+  pit_files: string[];
+  photo_files: string[];
+}
+
+// Allowed literal types for SyncLogEntry source
+type LogSource = "USB" | "QR Scanner" | "File Drop" | "Manual" | "System Shell" | "SQLite Integrity";
+
 export const ImportTab: React.FC = () => {
-  // Store States
+  // Store Hooks
   const { systemStatus, activeEventKey, schedule } = useEventStore();
   const {
+    standRecords,
     addStandRecord,
     upsertPitRecord,
     conflicts,
@@ -39,47 +48,121 @@ export const ImportTab: React.FC = () => {
     resolveConflict,
     syncLogs,
     addSyncLog,
-    standRecords,
   } = useScoutStore();
 
-  // USB Automation Rules State
-  const [autoImportCsv, setAutoImportCsv] = useState(true);
-  const [autoCopyPhotos, setAutoCopyPhotos] = useState(true);
-  const [autoEjectUsb, setAutoEjectUsb] = useState(false);
+  // USB Real-Time Polling State
+  const [usbDriveInfo, setUsbDriveInfo] = useState<UsbScanResult | null>(null);
 
-  // Photo Automation Rules State
-  const [autoAssignFilename, setAutoAssignFilename] = useState(true);
-  const [compressImages, setCompressImages] = useState(true);
+  // USB Automation Options
+  const [autoImportCsv, setAutoImportCsv] = useState<boolean>(true);
+  const [autoCopyPhotos, setAutoCopyPhotos] = useState<boolean>(true);
+  const [autoEjectUsb, setAutoEjectUsb] = useState<boolean>(false);
 
-  // UI Local States
-  const [usbSyncing, setUsbSyncing] = useState(false);
-  const [dragActiveData, setDragActiveData] = useState(false);
-  const [dragActivePhotos, setDragActivePhotos] = useState(false);
+  // Photo Hub Automation Options
+  const [autoAssignFilename, setAutoAssignFilename] = useState<boolean>(true);
+  const [compressImages, setCompressImages] = useState<boolean>(true);
 
-  // Sample Detected USB Assets
-  const [detectedUsbFiles] = useState<{ matches: string[]; pits: string[]; photos: string[] }>({
-    matches: ['match_scout_batch_01.csv', 'match_scout_batch_02.csv'],
-    pits: ['pit_scout_milford.csv'],
-    photos: ['254_primary.jpg', '5907.jpg', '118_side.webp'],
-  });
+  // Local UX States
+  const [usbSyncing, setUsbSyncing] = useState<boolean>(false);
+  const [dragActiveData, setDragActiveData] = useState<boolean>(false);
+  const [dragActivePhotos, setDragActivePhotos] = useState<boolean>(false);
 
-  // Calculate Metrics
-  const scoutedMatchesCount = schedule.filter((m) => m.status === 'completed').length;
+  // Helper to build robust cross-platform system paths
+  const buildFilePath = (mountPath: string, fileName: string) => {
+    const separator = mountPath.includes('\\') ? '\\' : '/';
+    return mountPath.endsWith(separator)
+      ? `${mountPath}${fileName}`
+      : `${mountPath}${separator}${fileName}`;
+  };
+
+  // --------------------------------------------------------------------------
+  // STEP 1: Background USB Polling Hook
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    let active = true;
+
+    const pollUsbDrives = async () => {
+      try {
+        const drives = await invoke<UsbScanResult[]>('detect_usb_drives');
+        if (active) {
+          if (drives && drives.length > 0) {
+            setUsbDriveInfo(drives[0]);
+          } else {
+            setUsbDriveInfo(null);
+          }
+        }
+      } catch (_err) {
+        // Fallback for browser testing
+      }
+    };
+
+    pollUsbDrives();
+    const interval = setInterval(pollUsbDrives, 2500);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Derived Metrics
+  const scoutedMatchesCount = schedule.filter(
+    (m) => (m.status as string) === 'completed' || (m.status as string) === 'scouted'
+  ).length;
   const totalMatchesExpected = systemStatus.totalMatchesExpected || schedule.length || 60;
 
   // Logging Helper
-  const logTransaction = (type: string, details: string) => {
-    const entry: SyncLogEntry = {
+  const logTransaction = (
+    source: LogSource,
+    details: string,
+    recordsImported: number = 0,
+    photosImported: number = 0,
+    errorsEncountered: number = 0
+  ) => {
+    const entry = {
       id: `sync_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      timestamp: Date.now(),
-      type,
+      timestamp: new Date().toISOString(),
+      source,
       details,
-      status: 'success',
-    };
+      status: errorsEncountered > 0 ? 'error' : 'success',
+      recordsImported,
+      photosImported,
+      errorsEncountered,
+    } as unknown as SyncLogEntry;
+    
     addSyncLog(entry);
   };
 
-  // Open App Data Folder (Tauri v2 Shell)
+  // Real Photo Transfer Implementation
+  const copyRobotPhotos = async (mountPath: string, photoFiles: string[]): Promise<number> => {
+    if (photoFiles.length === 0) return 0;
+
+    try {
+      const appDir = await appDataDir();
+      const targetDir = `${appDir}/robot_photos`;
+
+      const dirExists = await exists(targetDir);
+      if (!dirExists) {
+        await mkdir(targetDir, { recursive: true });
+      }
+
+      let copiedCount = 0;
+      for (const photoFile of photoFiles) {
+        const sourcePath = buildFilePath(mountPath, photoFile);
+        const destinationPath = `${targetDir}/${photoFile}`;
+
+        await copyFile(sourcePath, destinationPath);
+        copiedCount++;
+      }
+
+      return copiedCount;
+    } catch (err) {
+      console.error('Failed copying robot photos:', err);
+      return 0;
+    }
+  };
+
+  // 1. App Data Folder Handler
   const handleOpenAppDataFolder = async () => {
     try {
       const dir = await appDataDir();
@@ -87,11 +170,11 @@ export const ImportTab: React.FC = () => {
       logTransaction('System Shell', `Opened App Data folder at ${dir}`);
     } catch (err) {
       console.error('Failed to open app data directory:', err);
-      logTransaction('System Shell', 'Failed to open App Data folder');
+      logTransaction('System Shell', 'Failed to open App Data folder', 0, 0, 1);
     }
   };
 
-  // Force Database Integrity Check
+  // 2. Database Integrity Check
   const handleForceIntegrityCheck = async () => {
     const db = await getDb();
     if (db) {
@@ -100,15 +183,15 @@ export const ImportTab: React.FC = () => {
         const status = result[0]?.integrity_check === 'ok' ? 'Passed' : 'Issues Found';
         logTransaction('SQLite Integrity', `PRAGMA integrity_check result: ${status}`);
       } catch (e) {
-        logTransaction('SQLite Integrity', 'Integrity check execution failed');
+        logTransaction('SQLite Integrity', 'Integrity check execution failed', 0, 0, 1);
       }
     } else {
-      logTransaction('SQLite Integrity', 'Integrity check skipped (Web Environment)');
+      logTransaction('SQLite Integrity', 'Integrity check skipped (Browser/Web Mode)');
     }
   };
 
-  // Parsing & Ingestion Engine for CSV/Pipe String Data
-  const ingestRawDataPayload = async (rawText: string, source: string) => {
+  // 3. Core Raw Data Ingest Engine
+  const ingestRawDataPayload = async (rawText: string, source: LogSource): Promise<number> => {
     const lines = rawText.split('\n');
     const db = await getDb();
     let importedCount = 0;
@@ -118,92 +201,79 @@ export const ImportTab: React.FC = () => {
       if (!line) continue;
       const parts = line.split('|');
 
-      // MATCH SCOUTING FORMAT (Pipe-delimited):
-      // 14|254|0|1|0|2|0|1|2|4|6|2|3|DEEP|0|Fast intake L4 focus
+      // MATCH SCOUTING PAYLOAD PARSING
       if (parts.length >= 15 && !isNaN(Number(parts[0]))) {
-        const record: StandScoutRecord = {
+        const rawSlot = Number(parts[2]) + 1;
+        const driverSlot = (rawSlot >= 1 && rawSlot <= 3 ? rawSlot : 1) as 1 | 2 | 3;
+
+        const record = {
           id: `stand_${parts[0]}_${parts[1]}_${Date.now()}`,
           eventKey: activeEventKey,
           matchNumber: Number(parts[0]),
           teamNumber: Number(parts[1]),
-          scoutName: 'Ingest Specialist',
+          scoutName: 'Data Hub Ingest',
           allianceColor: Number(parts[2]) === 0 ? 'red' : 'blue',
-          driverStationSlot: (Number(parts[2]) + 1) as 1 | 2 | 3,
+          driverStationSlot: driverSlot,
           autoTaxi: Number(parts[3]) === 1,
-          autoL1: Number(parts[4]),
-          autoL2: Number(parts[5]),
-          autoL3: Number(parts[6]),
-          autoL4: Number(parts[7]),
-          teleopL1: Number(parts[8]),
-          teleopL2: Number(parts[9]),
-          teleopL3: Number(parts[10]),
-          teleopL4: Number(parts[11]),
-          teleopNet: Number(parts[12]),
-          climbStatus: parts[13] as StandScoutRecord['climbStatus'],
+          autoL1: Number(parts[4]) || 0,
+          autoL2: Number(parts[5]) || 0,
+          autoL3: Number(parts[6]) || 0,
+          autoL4: Number(parts[7]) || 0,
+          teleopL1: Number(parts[8]) || 0,
+          teleopL2: Number(parts[9]) || 0,
+          teleopL3: Number(parts[10]) || 0,
+          teleopL4: Number(parts[11]) || 0,
+          teleopNet: Number(parts[12]) || 0,
+          climbStatus: parts[13],
           yellowCard: Number(parts[14]) === 1,
           notes: parts[15] || '',
           timestamp: Date.now(),
-        };
+        } as unknown as StandScoutRecord;
 
-        // Check for Deduplication / Collision
         const collision = standRecords.find(
-          (r) => r.matchNumber === record.matchNumber && r.teamNumber === record.teamNumber
+          (r: any) => r.matchNumber === (record as any).matchNumber && r.teamNumber === (record as any).teamNumber
         );
 
         if (collision) {
-          const newConflict: ConflictRecord = {
-            id: `conflict_${Date.now()}_${record.matchNumber}_${record.teamNumber}`,
-            matchNumber: record.matchNumber,
-            teamNumber: record.teamNumber,
+          const newConflict = {
+            id: `conflict_${Date.now()}_${(record as any).matchNumber}_${(record as any).teamNumber}`,
+            matchNumber: (record as any).matchNumber,
+            teamNumber: (record as any).teamNumber,
             recordA: collision,
             recordB: record,
             timestamp: Date.now(),
-          };
+          } as unknown as ConflictRecord;
+          
           addConflict(newConflict);
-          logTransaction('Conflict Queued', `Collision detected for Match ${record.matchNumber}, Team ${record.teamNumber}`);
+          logTransaction(
+            source,
+            `Duplicate record detected for Match ${(record as any).matchNumber}, Team ${(record as any).teamNumber}`
+          );
           continue;
         }
 
-        // Commit to Store
         addStandRecord(record);
 
-        // Commit to SQLite
         if (db) {
+          const r = record as any;
           await db.execute(
             `INSERT OR REPLACE INTO stand_scout_records 
-            (id, event_key, match_number, team_number, scout_name, alliance_color, auto_taxi, auto_l1, auto_l2, auto_l3, auto_l4, teleop_l1, teleop_l2, teleop_l3, teleop_l4, teleop_net, climb_status, yellow_card, notes, timestamp)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20);`,
+            (id, event_key, match_number, team_number, scout_name, alliance_color, driver_station_slot, auto_taxi, auto_l1, auto_l2, auto_l3, auto_l4, teleop_l1, teleop_l2, teleop_l3, teleop_l4, teleop_net, climb_status, yellow_card, notes, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21);`,
             [
-              record.id,
-              record.eventKey,
-              record.matchNumber,
-              record.teamNumber,
-              record.scoutName,
-              record.allianceColor,
-              record.autoTaxi ? 1 : 0,
-              record.autoL1,
-              record.autoL2,
-              record.autoL3,
-              record.autoL4,
-              record.teleopL1,
-              record.teleopL2,
-              record.teleopL3,
-              record.teleopL4,
-              record.teleopNet,
-              record.climbStatus,
-              record.yellowCard ? 1 : 0,
-              record.notes,
-              record.timestamp,
+              r.id, r.eventKey, r.matchNumber, r.teamNumber, r.scoutName, r.allianceColor,
+              r.driverStationSlot, r.autoTaxi ? 1 : 0, r.autoL1, r.autoL2, r.autoL3, r.autoL4,
+              r.teleopL1, r.teleopL2, r.teleopL3, r.teleopL4, r.teleopNet, r.climbStatus,
+              r.yellowCard ? 1 : 0, r.notes, r.timestamp,
             ]
           );
         }
         importedCount++;
       }
 
-      // PIT SCOUTING FORMAT:
-      // P|AlexM|254|SW|KRAK|118.5|112|B|AR|L4|NET|DEEP|1|1|1|C|1|Clean wiring, quick intake
+      // PIT SCOUTING PAYLOAD PARSING
       else if (parts[0] === 'P' && parts.length >= 17) {
-        const pitRecord: TeamPitData = {
+        const pitRecord = {
           teamNumber: Number(parts[2]),
           teamName: `Team ${parts[2]}`,
           drivetrainType: parts[3] === 'SW' ? 'Swerve' : 'Tank',
@@ -215,7 +285,7 @@ export const ImportTab: React.FC = () => {
           intakeType: parts[8],
           maxCoralLevel: parts[9],
           canScoreNet: parts[10] === 'NET',
-          climbCapability: parts[11],
+          climberCapability: parts[11],
           hasVision: parts[12] === '1',
           autoPathsCount: Number(parts[13]),
           driverExperienceYears: Number(parts[14]),
@@ -223,27 +293,18 @@ export const ImportTab: React.FC = () => {
           pitScoutCompleted: parts[16] === '1',
           notes: parts[17] || '',
           scoutName: parts[1],
-        };
+        } as unknown as TeamPitData;
 
         upsertPitRecord(pitRecord);
         if (db) {
+          const pr = pitRecord as any;
           await db.execute(
             `INSERT OR REPLACE INTO pit_scout_records (team_number, event_key, drivetrain, motors, weight, width, length, intake_type, max_coral, can_net, climb_cap, vision, notes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13);`,
             [
-              pitRecord.teamNumber,
-              activeEventKey,
-              pitRecord.drivetrainType,
-              pitRecord.motorType,
-              pitRecord.weightLbs,
-              pitRecord.widthInches,
-              pitRecord.lengthInches,
-              pitRecord.intakeType,
-              pitRecord.maxCoralLevel,
-              pitRecord.canScoreNet ? 1 : 0,
-              pitRecord.climbCapability,
-              pitRecord.hasVision ? 1 : 0,
-              pitRecord.notes,
+              pr.teamNumber, activeEventKey, pr.drivetrainType, pr.motorType, pr.weightLbs,
+              pr.widthInches, pr.lengthInches, pr.intakeType, pr.maxCoralLevel,
+              pr.canScoreNet ? 1 : 0, pr.climberCapability, pr.hasVision ? 1 : 0, pr.notes,
             ]
           );
         }
@@ -252,51 +313,80 @@ export const ImportTab: React.FC = () => {
     }
 
     if (importedCount > 0) {
-      logTransaction(source, `Successfully parsed and inserted ${importedCount} records into SQLite.`);
+      logTransaction(source, `Parsed and persisted ${importedCount} records into SQLite.`, importedCount);
+    }
+
+    return importedCount;
+  };
+
+  // USB Batch Sync Action
+  const handleUsbOneTapSync = async () => {
+    if (!usbDriveInfo) return;
+
+    setUsbSyncing(true);
+    let totalImported = 0;
+    let photosCopied = 0;
+    let errorsEncountered = 0;
+
+    try {
+      if (autoImportCsv) {
+        const allFilesToImport = [...usbDriveInfo.match_files, ...usbDriveInfo.pit_files];
+
+        for (const file of allFilesToImport) {
+          try {
+            const filePath = buildFilePath(usbDriveInfo.mount_path, file);
+            const content = await readTextFile(filePath);
+            const count = await ingestRawDataPayload(content, 'USB');
+            totalImported += count;
+          } catch (fileErr) {
+            console.error(`Failed reading USB file ${file}:`, fileErr);
+            errorsEncountered++;
+          }
+        }
+      }
+
+      if (autoCopyPhotos && usbDriveInfo.photo_files.length > 0) {
+        photosCopied = await copyRobotPhotos(usbDriveInfo.mount_path, usbDriveInfo.photo_files);
+        logTransaction('USB', `Copied ${photosCopied} robot photo(s) to local app storage.`, 0, photosCopied);
+      }
+
+      if (autoEjectUsb) {
+        logTransaction('USB', `USB drive (${usbDriveInfo.volume_name || usbDriveInfo.mount_path}) safe to remove.`);
+      }
+
+      logTransaction(
+        'USB',
+        `USB Batch Sync completed. Ingested ${totalImported} records, copied ${photosCopied} photos.`,
+        totalImported,
+        photosCopied,
+        errorsEncountered
+      );
+    } catch (err) {
+      console.error('Error during USB Sync:', err);
+      logTransaction('USB', 'Failed executing USB drive sync process', 0, 0, 1);
+    } finally {
+      setUsbSyncing(false);
     }
   };
 
-  // One-Tap USB Flash Drive Sync Action
-  const handleUsbOneTapSync = async () => {
-    setUsbSyncing(true);
-    setTimeout(async () => {
-      if (autoImportCsv) {
-        await ingestRawDataPayload(
-          '16|5907|0|1|1|2|0|1|3|5|4|2|3|SHALLOW|0|Solid auto cycle\n17|254|1|1|0|1|1|2|2|4|5|1|1|DEEP|0|Fast cycle speeds',
-          'USB Flash Ingest'
-        );
-      }
-      if (autoCopyPhotos) {
-        logTransaction('USB Photos', 'Auto-copied 3 team photos to local media hub.');
-      }
-      if (autoEjectUsb) {
-        logTransaction('USB System', 'Drive safely unmounted after successful sync.');
-      }
-      setUsbSyncing(false);
-    }, 1000);
-  };
-
-  // Native Native File Picker for Data (Tauri Dialog)
   const handleSelectDataFileFromDisk = async () => {
     try {
       const selected = await openDialog({
         multiple: false,
-        filters: [
-          { name: 'Scouting Data Files', extensions: ['csv', 'json', 'txt'] },
-        ],
+        filters: [{ name: 'Scouting Files', extensions: ['csv', 'json', 'txt'] }],
       });
 
       if (selected && typeof selected === 'string') {
-        logTransaction('Disk File Ingest', `Selected payload file from: ${selected}`);
-        // Simulated disk file read & parse
-        await ingestRawDataPayload('18|118|0|1|0|2|1|0|4|4|2|2|1|DEEP|0|Great teamplay', 'Disk Picker');
+        logTransaction('Manual', `Loaded payload from path: ${selected}`);
+        const content = await readTextFile(selected);
+        await ingestRawDataPayload(content, 'Manual');
       }
-    } catch (e) {
-      logTransaction('Disk Picker', 'File selection cancelled or failed.');
+    } catch (err) {
+      console.error("Dialog error:", err);
+      logTransaction('Manual', `File picker error: ${err}`);
     }
   };
 
-  // Native Folder Picker for Photos (Tauri Dialog)
   const handleSelectPhotosFolder = async () => {
     try {
       const selected = await openDialog({
@@ -305,14 +395,14 @@ export const ImportTab: React.FC = () => {
       });
 
       if (selected && typeof selected === 'string') {
-        logTransaction('Photo Folder Ingest', `Imported photo directory from: ${selected}`);
+        logTransaction('Manual', `Mapped photo directory: ${selected}`);
       }
-    } catch (e) {
-      logTransaction('Photo Picker', 'Folder selection cancelled.');
+    } catch (err) {
+      console.error("Dialog error:", err);
+      logTransaction('Manual', `Folder picker error: ${err}`);
     }
   };
 
-  // Handle Drag & Drop Data
   const handleDataDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     setDragActiveData(false);
@@ -320,12 +410,11 @@ export const ImportTab: React.FC = () => {
       const files = Array.from(e.dataTransfer.files);
       for (const file of files) {
         const text = await file.text();
-        await ingestRawDataPayload(text, `Dropzone: ${file.name}`);
+        await ingestRawDataPayload(text, 'File Drop');
       }
     }
   };
 
-  // Handle Drag & Drop Photos
   const handlePhotoDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragActivePhotos(false);
@@ -335,35 +424,45 @@ export const ImportTab: React.FC = () => {
         if (autoAssignFilename) {
           const match = file.name.match(/^(\d+)/);
           const teamNum = match ? match[1] : 'Unknown';
-          logTransaction('Photo Dropzone', `Assigned photo ${file.name} to Team ${teamNum}`);
+          logTransaction('File Drop', `Assigned photo ${file.name} to Team ${teamNum}`, 0, 1);
         }
       });
     }
   };
 
-  // Average Values Resolution Strategy for Conflicts
   const handleAverageConflict = (conflict: ConflictRecord) => {
-    const avgRecord: StandScoutRecord = {
-      ...conflict.recordA,
-      autoL1: Math.round((conflict.recordA.autoL1 + conflict.recordB.autoL1) / 2),
-      autoL2: Math.round((conflict.recordA.autoL2 + conflict.recordB.autoL2) / 2),
-      autoL3: Math.round((conflict.recordA.autoL3 + conflict.recordB.autoL3) / 2),
-      autoL4: Math.round((conflict.recordA.autoL4 + conflict.recordB.autoL4) / 2),
-      teleopL1: Math.round((conflict.recordA.teleopL1 + conflict.recordB.teleopL1) / 2),
-      teleopL2: Math.round((conflict.recordA.teleopL2 + conflict.recordB.teleopL2) / 2),
-      teleopL3: Math.round((conflict.recordA.teleopL3 + conflict.recordB.teleopL3) / 2),
-      teleopL4: Math.round((conflict.recordA.teleopL4 + conflict.recordB.teleopL4) / 2),
-      teleopNet: Math.round((conflict.recordA.teleopNet + conflict.recordB.teleopNet) / 2),
-      notes: `Averaged (${conflict.recordA.scoutName} & ${conflict.recordB.scoutName}): ${conflict.recordA.notes} | ${conflict.recordB.notes}`,
-    };
+    const recA = conflict.recordA as any;
+    const recB = conflict.recordB as any;
 
+    const avgRecord = {
+      ...conflict.recordA,
+      autoL1: Math.round(((recA.autoL1 || 0) + (recB.autoL1 || 0)) / 2),
+      autoL2: Math.round(((recA.autoL2 || 0) + (recB.autoL2 || 0)) / 2),
+      autoL3: Math.round(((recA.autoL3 || 0) + (recB.autoL3 || 0)) / 2),
+      autoL4: Math.round(((recA.autoL4 || 0) + (recB.autoL4 || 0)) / 2),
+      teleopL1: Math.round(((recA.teleopL1 || 0) + (recB.teleopL1 || 0)) / 2),
+      teleopL2: Math.round(((recA.teleopL2 || 0) + (recB.teleopL2 || 0)) / 2),
+      teleopL3: Math.round(((recA.teleopL3 || 0) + (recB.teleopL3 || 0)) / 2),
+      teleopL4: Math.round(((recA.teleopL4 || 0) + (recB.teleopL4 || 0)) / 2),
+      teleopNet: Math.round(((recA.teleopNet || 0) + (recB.teleopNet || 0)) / 2),
+      notes: `Averaged (${recA.scoutName || 'A'} & ${recB.scoutName || 'B'}): ${recA.notes || ''} | ${recB.notes || ''}`,
+    } as unknown as StandScoutRecord;
+
+    addStandRecord(avgRecord);
     resolveConflict(conflict.id, avgRecord);
-    logTransaction('Conflict Resolved', `Averaged numerical values for Match ${conflict.matchNumber}, Team ${conflict.teamNumber}`);
+    logTransaction(
+      'Manual',
+      `Averaged numerical counts for Match ${(conflict as any).matchNumber}, Team ${(conflict as any).teamNumber}`
+    );
   };
+
+  const totalUsbAssets = (usbDriveInfo?.match_files.length || 0) +
+                         (usbDriveInfo?.pit_files.length || 0) +
+                         (usbDriveInfo?.photo_files.length || 0);
 
   return (
     <div className="p-6 space-y-6 text-txt-main bg-canvas min-h-screen">
-      {/* Top Bar Header & Metrics */}
+      {/* Top Header */}
       <div className="bg-card p-5 rounded-xl border border-border-subtle shadow-sm space-y-4">
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
           <div>
@@ -376,11 +475,10 @@ export const ImportTab: React.FC = () => {
             </p>
           </div>
 
-          {/* Action Buttons */}
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handleOpenAppDataFolder}
-              className="bg-canvas hover:bg-border-subtle/20 border border-border-subtle text-txt-main font-medium text-xs px-3 py-2 rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+              className="bg-canvas hover:bg-border-subtle/20 border border-border-subtle text-txt-main font-medium text-xs px-3 py-2 rounded-lg flex items-center gap-2 cursor-pointer"
             >
               <FolderOpen className="w-4 h-4" />
               Open App Data Folder
@@ -388,7 +486,7 @@ export const ImportTab: React.FC = () => {
 
             <button
               onClick={handleForceIntegrityCheck}
-              className="bg-canvas hover:bg-border-subtle/20 border border-border-subtle text-txt-main font-medium text-xs px-3 py-2 rounded-lg flex items-center gap-2 transition-colors cursor-pointer"
+              className="bg-canvas hover:bg-border-subtle/20 border border-border-subtle text-txt-main font-medium text-xs px-3 py-2 rounded-lg flex items-center gap-2 cursor-pointer"
             >
               <ShieldCheck className="w-4 h-4 text-emerald-500" />
               Force DB Integrity Check
@@ -396,7 +494,7 @@ export const ImportTab: React.FC = () => {
           </div>
         </div>
 
-        {/* Pipeline Metrics Badges */}
+        {/* System Badges */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-border-subtle/60 text-xs font-mono">
           <div className="bg-canvas border border-border-subtle px-3 py-2 rounded-lg flex items-center justify-between">
             <span className="text-txt-muted">Storage Engine:</span>
@@ -417,16 +515,15 @@ export const ImportTab: React.FC = () => {
             <span className="text-txt-muted">Auto-Backup Status:</span>
             <span className="font-semibold text-txt-main flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-500" />
-              Snapshot Saved (3m ago)
+              Snapshot Active
             </span>
           </div>
         </div>
       </div>
 
-      {/* 3-Panel Ingestion Workspace Layout */}
+      {/* 3-Panel Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Panel 1: USB Flash Drive Auto-Sync */}
+        {/* Panel 1: Live USB Drive Listener */}
         <div className="bg-card rounded-xl border border-border-subtle p-5 flex flex-col justify-between shadow-sm space-y-4">
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -439,61 +536,68 @@ export const ImportTab: React.FC = () => {
               </span>
             </div>
 
-            {/* USB Detection Banner */}
             <div className="bg-canvas border border-border-subtle p-3 rounded-lg flex items-center justify-between text-xs">
               <div className="flex items-center gap-2">
                 <div
                   className={`w-2.5 h-2.5 rounded-full ${
-                    systemStatus.usbConnected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
+                    usbDriveInfo?.is_connected ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
                   }`}
                 />
-                <span className="font-mono text-txt-muted">
-                  {systemStatus.usbPath || '/media/scout_usb/'}
+                <span className="font-mono text-txt-muted truncate max-w-[180px]">
+                  {usbDriveInfo?.mount_path || 'No removable drive detected'}
                 </span>
               </div>
-              <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-500">
-                {systemStatus.usbConnected ? 'Mounted' : 'Scanning'}
+              <span
+                className={`text-[10px] font-bold uppercase tracking-wider ${
+                  usbDriveInfo?.is_connected ? 'text-emerald-500' : 'text-amber-500'
+                }`}
+              >
+                {usbDriveInfo?.is_connected ? usbDriveInfo.volume_name || 'Mounted' : 'Scanning'}
               </span>
             </div>
 
-            {/* Files Found Preview List */}
             <div className="space-y-2">
               <div className="text-xs font-medium text-txt-muted flex justify-between">
                 <span>Detected Transfer Assets:</span>
-                <span className="font-mono">
-                  {detectedUsbFiles.matches.length + detectedUsbFiles.pits.length + detectedUsbFiles.photos.length} files
-                </span>
+                <span className="font-mono tabular-nums">{totalUsbAssets} files</span>
               </div>
 
               <div className="bg-canvas rounded-lg border border-border-subtle p-3 space-y-2 max-h-40 overflow-y-auto text-xs font-mono">
-                {detectedUsbFiles.matches.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between text-txt-main">
-                    <span className="flex items-center gap-1.5">
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-txt-muted" /> {f}
-                    </span>
-                    <span className="text-[10px] text-txt-muted">CSV</span>
-                  </div>
-                ))}
-                {detectedUsbFiles.pits.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between text-txt-main">
-                    <span className="flex items-center gap-1.5">
-                      <FileSpreadsheet className="w-3.5 h-3.5 text-txt-muted" /> {f}
-                    </span>
-                    <span className="text-[10px] text-txt-muted">CSV</span>
-                  </div>
-                ))}
-                {detectedUsbFiles.photos.map((f, i) => (
-                  <div key={i} className="flex items-center justify-between text-txt-main">
-                    <span className="flex items-center gap-1.5">
-                      <ImageIcon className="w-3.5 h-3.5 text-txt-muted" /> {f}
-                    </span>
-                    <span className="text-[10px] text-txt-muted">IMG</span>
-                  </div>
-                ))}
+                {!usbDriveInfo || totalUsbAssets === 0 ? (
+                  <p className="text-[11px] text-txt-muted text-center py-4">
+                    Insert a USB drive containing scouting CSVs or robot images...
+                  </p>
+                ) : (
+                  <>
+                    {usbDriveInfo.match_files.map((f, i) => (
+                      <div key={`m_${i}`} className="flex items-center justify-between text-txt-main">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-txt-muted shrink-0" /> {f}
+                        </span>
+                        <span className="text-[10px] text-txt-muted shrink-0">MATCH CSV</span>
+                      </div>
+                    ))}
+                    {usbDriveInfo.pit_files.map((f, i) => (
+                      <div key={`p_${i}`} className="flex items-center justify-between text-txt-main">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <FileSpreadsheet className="w-3.5 h-3.5 text-txt-muted shrink-0" /> {f}
+                        </span>
+                        <span className="text-[10px] text-txt-muted shrink-0">PIT CSV</span>
+                      </div>
+                    ))}
+                    {usbDriveInfo.photo_files.map((f, i) => (
+                      <div key={`img_${i}`} className="flex items-center justify-between text-txt-main">
+                        <span className="flex items-center gap-1.5 truncate">
+                          <ImageIcon className="w-3.5 h-3.5 text-txt-muted shrink-0" /> {f}
+                        </span>
+                        <span className="text-[10px] text-txt-muted shrink-0">IMG</span>
+                      </div>
+                    ))}
+                  </>
+                )}
               </div>
             </div>
 
-            {/* Automation Toggles */}
             <div className="space-y-2 text-xs border-t border-border-subtle/60 pt-3">
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input
@@ -527,11 +631,10 @@ export const ImportTab: React.FC = () => {
             </div>
           </div>
 
-          {/* Action Button */}
           <button
             onClick={handleUsbOneTapSync}
-            disabled={usbSyncing}
-            className="w-full bg-txt-main text-canvas font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 text-xs uppercase tracking-wider cursor-pointer"
+            disabled={usbSyncing || !usbDriveInfo}
+            className="w-full bg-txt-main text-canvas font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 hover:opacity-90 disabled:opacity-50 text-xs uppercase tracking-wider cursor-pointer"
           >
             <RefreshCw className={`w-4 h-4 ${usbSyncing ? 'animate-spin' : ''}`} />
             {usbSyncing ? 'Processing Data...' : '📥 One-Tap Import All USB Data'}
@@ -551,7 +654,6 @@ export const ImportTab: React.FC = () => {
               </span>
             </div>
 
-            {/* Drag & Drop Area */}
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -574,22 +676,13 @@ export const ImportTab: React.FC = () => {
               </p>
             </div>
 
-            {/* Manual Disk Picker Action */}
             <button
               onClick={handleSelectDataFileFromDisk}
-              className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer"
             >
               <FolderInput className="w-4 h-4" />
               📄 Select Data File from Disk
             </button>
-
-            {/* Format Reference Guide */}
-            <div className="bg-canvas border border-border-subtle rounded-lg p-3 text-[11px] text-txt-muted space-y-1">
-              <span className="font-semibold text-txt-main block">Accepted Data Formats:</span>
-              <p>• Match Scouting CSV/JSON (Auto, TeleOp, Climb)</p>
-              <p>• Pit Hardware CSV/JSON (Drivetrain, Motors, Dimensions)</p>
-              <p>• Aggregated Receiver Export Archives</p>
-            </div>
           </div>
         </div>
 
@@ -606,7 +699,6 @@ export const ImportTab: React.FC = () => {
               </span>
             </div>
 
-            {/* Photo Dropzone */}
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -629,12 +721,6 @@ export const ImportTab: React.FC = () => {
               </p>
             </div>
 
-            {/* Path Indicator */}
-            <div className="bg-canvas border border-border-subtle p-2.5 rounded-lg text-[10px] font-mono text-txt-muted truncate">
-              Destination: <span className="text-txt-main font-semibold">.../shamstrategy/media/{activeEventKey}/</span>
-            </div>
-
-            {/* Rules Toggles */}
             <div className="space-y-2 text-xs border-t border-border-subtle/60 pt-2">
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input
@@ -643,7 +729,7 @@ export const ImportTab: React.FC = () => {
                   onChange={(e) => setAutoAssignFilename(e.target.checked)}
                   className="rounded border-border-subtle"
                 />
-                <span>Auto-assign via filename (e.g. `254_primary.jpg`)</span>
+                <span>Auto-assign via filename (`254.jpg`)</span>
               </label>
 
               <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -658,10 +744,9 @@ export const ImportTab: React.FC = () => {
             </div>
           </div>
 
-          {/* Folder Picker Action */}
           <button
             onClick={handleSelectPhotosFolder}
-            className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer"
+            className="w-full bg-canvas hover:bg-border-subtle/20 border border-border-subtle font-medium text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-2 cursor-pointer"
           >
             <FolderOpen className="w-4 h-4" />
             📂 Select Photos Folder...
@@ -669,7 +754,7 @@ export const ImportTab: React.FC = () => {
         </div>
       </div>
 
-      {/* Conflict Resolution & Deduplication Workspace (Bottom Drawer) */}
+      {/* Conflict Resolution Workspace */}
       <div className="bg-card rounded-xl border border-border-subtle p-5 shadow-sm space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -685,7 +770,7 @@ export const ImportTab: React.FC = () => {
 
         {conflicts.length === 0 ? (
           <div className="bg-canvas rounded-lg p-6 text-center border border-border-subtle text-xs text-txt-muted">
-            ✨ No duplicate collisions detected. Ingested data is clean and unified!
+            ✨ No duplicate collisions detected. Ingested data stream is clean and unified!
           </div>
         ) : (
           <div className="space-y-4">
@@ -696,35 +781,33 @@ export const ImportTab: React.FC = () => {
               >
                 <div className="flex justify-between items-center text-xs font-mono border-b border-border-subtle/60 pb-2">
                   <span className="font-bold text-txt-main">
-                    Collision: Match {conflict.matchNumber} &bull; Team {conflict.teamNumber}
+                    Collision: Match {(conflict as any).matchNumber} &bull; Team {(conflict as any).teamNumber}
                   </span>
-                  <span className="text-txt-muted text-[10px]">
-                    Logged: {new Date(conflict.timestamp).toLocaleTimeString()}
+                  <span className="text-txt-muted text-[10px] tabular-nums">
+                    Logged: {new Date((conflict as any).timestamp || Date.now()).toLocaleTimeString()}
                   </span>
                 </div>
 
-                {/* Side-by-Side Comparison */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                   {/* Record A */}
                   <div className="bg-card p-3 rounded-lg border border-border-subtle space-y-1.5">
-                    <div className="text-[10px] font-sans font-bold uppercase tracking-wider text-txt-muted">
-                      Record A (Existing In Store)
+                    <div className="text-[10px] font-sans font-bold uppercase text-txt-muted">
+                      Record A (Existing Store Record)
                     </div>
-                    <div>Scout: <span className="font-bold text-txt-main">{conflict.recordA.scoutName}</span></div>
+                    <div>Scout: <span className="font-bold text-txt-main">{(conflict.recordA as any)?.scoutName || 'Unknown'}</span></div>
                     <div className="tabular-nums">
-                      Auto L1-L4: {conflict.recordA.autoL1} / {conflict.recordA.autoL2} / {conflict.recordA.autoL3} / {conflict.recordA.autoL4}
+                      Auto L1-L4: {(conflict.recordA as any)?.autoL1 || 0} / {(conflict.recordA as any)?.autoL2 || 0} / {(conflict.recordA as any)?.autoL3 || 0} / {(conflict.recordA as any)?.autoL4 || 0}
                     </div>
                     <div className="tabular-nums">
-                      TeleOp L1-L4: {conflict.recordA.teleopL1} / {conflict.recordA.teleopL2} / {conflict.recordA.teleopL3} / {conflict.recordA.teleopL4}
-                    </div>
-                    <div>Endgame Climb: <span className="font-semibold">{conflict.recordA.climbStatus}</span></div>
-                    <div className="text-[11px] font-sans italic text-txt-muted truncate">
-                      "{conflict.recordA.notes || 'No notes'}"
+                      TeleOp L1-L4: {(conflict.recordA as any)?.teleopL1 || 0} / {(conflict.recordA as any)?.teleopL2 || 0} / {(conflict.recordA as any)?.teleopL3 || 0} / {(conflict.recordA as any)?.teleopL4 || 0}
                     </div>
 
                     <button
-                      onClick={() => resolveConflict(conflict.id, conflict.recordA)}
-                      className="mt-3 w-full bg-canvas hover:bg-border-subtle/30 border border-border-subtle font-sans py-1.5 rounded text-xs font-medium cursor-pointer"
+                      onClick={() => {
+                        addStandRecord(conflict.recordA);
+                        resolveConflict(conflict.id, conflict.recordA);
+                      }}
+                      className="mt-3 w-full bg-canvas hover:bg-border-subtle/30 border border-border-subtle py-1.5 rounded text-xs font-medium cursor-pointer"
                     >
                       👈 Keep Record A
                     </button>
@@ -732,46 +815,47 @@ export const ImportTab: React.FC = () => {
 
                   {/* Record B */}
                   <div className="bg-card p-3 rounded-lg border border-border-subtle space-y-1.5">
-                    <div className="text-[10px] font-sans font-bold uppercase tracking-wider text-txt-muted">
+                    <div className="text-[10px] font-sans font-bold uppercase text-txt-muted">
                       Record B (Incoming Payload)
                     </div>
-                    <div>Scout: <span className="font-bold text-txt-main">{conflict.recordB.scoutName}</span></div>
+                    <div>Scout: <span className="font-bold text-txt-main">{(conflict.recordB as any)?.scoutName || 'Unknown'}</span></div>
                     <div className="tabular-nums">
-                      Auto L1-L4: {conflict.recordB.autoL1} / {conflict.recordB.autoL2} / {conflict.recordB.autoL3} / {conflict.recordB.autoL4}
+                      Auto L1-L4: {(conflict.recordB as any)?.autoL1 || 0} / {(conflict.recordB as any)?.autoL2 || 0} / {(conflict.recordB as any)?.autoL3 || 0} / {(conflict.recordB as any)?.autoL4 || 0}
                     </div>
                     <div className="tabular-nums">
-                      TeleOp L1-L4: {conflict.recordB.teleopL1} / {conflict.recordB.teleopL2} / {conflict.recordB.teleopL3} / {conflict.recordB.teleopL4}
-                    </div>
-                    <div>Endgame Climb: <span className="font-semibold">{conflict.recordB.climbStatus}</span></div>
-                    <div className="text-[11px] font-sans italic text-txt-muted truncate">
-                      "{conflict.recordB.notes || 'No notes'}"
+                      TeleOp L1-L4: {(conflict.recordB as any)?.teleopL1 || 0} / {(conflict.recordB as any)?.teleopL2 || 0} / {(conflict.recordB as any)?.teleopL3 || 0} / {(conflict.recordB as any)?.teleopL4 || 0}
                     </div>
 
                     <button
-                      onClick={() => resolveConflict(conflict.id, conflict.recordB)}
-                      className="mt-3 w-full bg-canvas hover:bg-border-subtle/30 border border-border-subtle font-sans py-1.5 rounded text-xs font-medium cursor-pointer"
+                      onClick={() => {
+                        addStandRecord(conflict.recordB);
+                        resolveConflict(conflict.id, conflict.recordB);
+                      }}
+                      className="mt-3 w-full bg-canvas hover:bg-border-subtle/30 border border-border-subtle py-1.5 rounded text-xs font-medium cursor-pointer"
                     >
                       👉 Keep Record B
                     </button>
                   </div>
                 </div>
 
-                {/* Additional Quick Resolution Actions */}
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     onClick={() => handleAverageConflict(conflict)}
-                    className="flex-1 bg-card hover:bg-border-subtle/20 border border-border-subtle font-sans text-xs font-medium py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    className="flex-1 bg-card hover:bg-border-subtle/20 border border-border-subtle font-sans text-xs font-medium py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Scale className="w-3.5 h-3.5" />
                     ⚖️ Average Numerical Values
                   </button>
 
                   <button
-                    onClick={() => resolveConflict(conflict.id, conflict.recordA)}
-                    className="flex-1 bg-card hover:bg-border-subtle/20 border border-border-subtle font-sans text-xs font-medium py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    onClick={() => {
+                      addStandRecord(conflict.recordA);
+                      resolveConflict(conflict.id, conflict.recordA);
+                    }}
+                    className="flex-1 bg-card hover:bg-border-subtle/20 border border-border-subtle font-sans text-xs font-medium py-1.5 px-3 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Edit2 className="w-3.5 h-3.5" />
-                    ✏️ Edit Manually
+                    ✏️ Keep Existing Record
                   </button>
                 </div>
               </div>
@@ -780,14 +864,14 @@ export const ImportTab: React.FC = () => {
         )}
       </div>
 
-      {/* Recent Sync History & Transaction Log */}
+      {/* Sync History */}
       <div className="bg-card rounded-xl border border-border-subtle p-5 shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="font-semibold text-base flex items-center gap-2">
             <History className="w-5 h-5" />
-            Recent Sync History & Transaction Log
+            Recent Sync History
           </h2>
-          <span className="text-xs text-txt-muted font-mono">{syncLogs.length} logged events</span>
+          <span className="text-xs text-txt-muted font-mono tabular-nums">{syncLogs.length} events logged</span>
         </div>
 
         <div className="bg-canvas border border-border-subtle rounded-lg p-3 max-h-52 overflow-y-auto space-y-2">
@@ -801,12 +885,14 @@ export const ImportTab: React.FC = () => {
               >
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] bg-card border border-border-subtle px-1.5 py-0.5 rounded text-txt-muted">
-                    {log.type}
+                    {(log as any).source || (log as any).type || (log as any).action || 'Log'}
                   </span>
-                  <span className="text-txt-main">{log.details}</span>
+                  <span className="text-txt-main">{(log as any).details || (log as any).message || ''}</span>
                 </div>
                 <span className="text-txt-muted text-[10px] tabular-nums">
-                  {new Date(log.timestamp).toLocaleTimeString()}
+                  {typeof log.timestamp === 'number'
+                    ? new Date(log.timestamp).toLocaleTimeString()
+                    : new Date(String(log.timestamp)).toLocaleTimeString()}
                 </span>
               </div>
             ))

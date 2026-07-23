@@ -4,9 +4,9 @@ import { useEventStore } from './store';
 import { initDb } from './lib/db';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { SettingsTab } from './components/tabs/SettingsTab';
+import { ImportTab } from './components/tabs/ImportTab';
 
-// Placeholder view wrappers for active tabs
-// (These can be replaced with full view components as they are built)
+// Placeholder view wrappers for remaining active tabs
 const DashboardView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Dashboard & Telemetry View</div>;
 const DirectoryView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Team Directory & Pit Data View</div>;
 const ScheduleView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Match Schedule View</div>;
@@ -15,7 +15,6 @@ const WhiteboardView = () => <div className="p-4 bg-card rounded-lg border borde
 const CheatsheetView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Strategy Cheat-Sheet View</div>;
 const PicklistView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">Playoff Picklist View</div>;
 const AiAssistantView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">AI Strategy Assistant ("Frank") View</div>;
-const SyncHubView = () => <div className="p-4 bg-card rounded-lg border border-border-subtle text-txt-main">USB Data Sync Hub View</div>;
 
 export const App: React.FC = () => {
   const [dbReady, setDbReady] = useState(false);
@@ -98,7 +97,7 @@ export const App: React.FC = () => {
       case 'ai_assistant':
         return <AiAssistantView />;
       case 'sync_hub':
-        return <SyncHubView />;
+        return <ImportTab />;
       case 'settings':
         return <SettingsTab />;
       default:

@@ -19,7 +19,7 @@ export const Header: React.FC = () => {
   const teamLogo = useEventStore((state) => state.teamLogo); // 👈 Retrieve team logo
 
   const [isMaximized, setIsMaximized] = useState(false);
-  const [isOnline, setIsOnline] = useState(
+  const [isOnline] = useState(
     typeof window !== 'undefined' ? navigator.onLine : true
   );
 
@@ -42,6 +42,8 @@ export const Header: React.FC = () => {
       unlisten.then((f) => f());
     };
   }, [appWindow]);
+
+  
 
   const handleHeaderMouseDown = async (e: React.MouseEvent<HTMLElement>) => {
     if (e.button !== 0) return;

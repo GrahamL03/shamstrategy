@@ -86,12 +86,12 @@ export interface ScoutState {
   bulkAddStandRecords: (records: StandScoutRecord[]) => void;
   upsertPitRecord: (record: TeamPitData) => void;
   setScoutUsers: (users: ScoutUser[]) => void;
-  addScoutUser: (user: string | Omit<ScoutUser, 'id'>) => void; // Accepts either name string or partial ScoutUser
+  addScoutUser: (user: string | Omit<ScoutUser, 'id'>) => void;
   toggleScoutActive: (id: string) => void;
   setShiftAssignments: (shifts: ShiftAssignment[]) => void;
   updateShiftAssignment: (shift: ShiftAssignment) => void;
   addConflict: (conflict: ConflictRecord) => void;
-  resolveConflict: (conflictId: string, chosenRecord: StandScoutRecord) => void;
+  resolveConflict: (conflictId: string, chosenRecord?: StandScoutRecord) => void;
   addSyncLog: (log: SyncLogEntry) => void;
 }
 
